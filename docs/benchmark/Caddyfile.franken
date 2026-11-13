@@ -1,0 +1,11 @@
+{
+	auto_https off
+	admin off
+	frankenphp {
+		num_threads 8
+	}
+}
+:80 {
+	root * /app
+	php_server
+}

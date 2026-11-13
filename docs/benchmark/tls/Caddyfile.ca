@@ -1,0 +1,7 @@
+{
+	admin off
+}
+https://ca.test {
+	tls internal
+	acme_server
+}

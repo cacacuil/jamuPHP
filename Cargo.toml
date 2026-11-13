@@ -1,0 +1,15 @@
+[package]
+name = "jamuphp"
+version = "0.0.1"
+edition = "2024"
+description = "Spike S1: supervisor yang menyalakan Caddy dan php-fpm dari hasil deteksi project"
+publish = false
+
+[dependencies]
+ctrlc = { version = "3", features = ["termination"] }
+libc = "0.2"
+serde_json = "1"
+
+[[bin]]
+name = "jamu"
+path = "src/main.rs"

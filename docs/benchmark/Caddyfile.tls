@@ -1,0 +1,10 @@
+{
+	admin off
+	default_sni situs.test
+	auto_https disable_redirects
+}
+https://situs.test {
+	tls /tls/tls.crt /tls/tls.key
+	root * /app
+	file_server
+}

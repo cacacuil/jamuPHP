@@ -1,0 +1,11 @@
+{
+	admin off
+	acme_ca https://ca.test/acme/local/directory
+	acme_ca_root /ca/root.crt
+	email admin@situs-b.test
+	default_sni situs-b.test
+}
+situs-b.test {
+	root * /app
+	file_server
+}

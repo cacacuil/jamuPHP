@@ -1,0 +1,5 @@
+RESULT|nginx+fpm(static8)|mem_awal=66MB/12p|mem_beban=117MB/12p|mem_diam15s=117MB/12p|WP=22.70|343.91ms|533.08ms|ok|statis7KB=39907.36|178.00us|1.45ms|ok|cache82KB=27054.93|256.00us|2.41ms|ok|opcache=on 557 fpm-fcgi 8.5.12 NTS
+RESULT|caddy+fpm(static8)|mem_awal=107MB/10p|mem_beban=168MB/10p|mem_diam15s=168MB/10p|WP=23.71|298.14ms|449.33ms|ok|statis7KB=14042.24|464.00us|5.27ms|ok|cache82KB=8429.39|744.00us|6.01ms|ok|opcache=on 557 fpm-fcgi 8.5.12 NTS
+RESULT|caddy+fpm(ondemand)|mem_awal=106MB/3p|mem_beban=82MB/2p|mem_diam15s=82MB/2p|WP=22.66|351.79ms|454.51ms|ok|statis7KB=13718.35|472.00us|5.97ms|ok|cache82KB=8003.77|788.00us|6.01ms|ok|opcache=on 557 fpm-fcgi 8.5.12 NTS
+RESULT|apache mod_php(prefork8)|mem_awal=68MB/9p|mem_beban=123MB/9p|mem_diam15s=123MB/9p|WP=23.43|281.41ms|526.78ms|ok|statis7KB=30397.85|232.00us|8.37ms|ok|cache82KB=20235.89|348.00us|1.31ms|ok|opcache=on 557 apache2handler 8.5.12 NTS
+RESULT|frankenphp klasik(8 thread)|mem_awal=120MB/1p|mem_beban=184MB/1p|mem_diam15s=182MB/1p|WP=21.66|363.82ms|562.98ms|ok|statis7KB=13683.05|477.00us|5.99ms|ok|cache82KB=7997.08|798.00us|6.41ms|ok|opcache=on 557 frankenphp 8.5.12 ZTS
