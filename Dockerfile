@@ -26,6 +26,10 @@ RUN install-php-extensions ${PHP_EXTENSIONS} \
 COPY --from=caddy /usr/bin/caddy /usr/local/bin/caddy
 COPY --from=build /src/target/release/jamu /usr/local/bin/jamu
 
+# Menautkan image di GHCR ke repositori sumbernya.
+LABEL org.opencontainers.image.source="https://github.com/cacacuil/jamuPHP" \
+      org.opencontainers.image.description="JamuPHP: jamu + Caddy + php-fpm dalam satu container"
+
 # Tidak ada yang berjalan sebagai root. Konfigurasi yang dibangkitkan jamu, soket php-fpm,
 # dan data Caddy ada di /var/lib/jamu, di luar folder situs.
 ENV XDG_STATE_HOME=/var/lib/jamu

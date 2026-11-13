@@ -10,7 +10,23 @@ jobs:
 
   image:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t jamuphp:8.4 .
       - run: tests/image.sh jamuphp:8.4
+      # Hanya image yang lulus uji asap yang diterbitkan.
+      # main -> ghcr.io/<pemilik>/jamuphp:8.4, branch spike/x -> :spike-x
+      - name: Terbitkan ke GHCR
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/spike/')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag=8.4
+          [ "$GITHUB_REF_NAME" = main ] || tag=${GITHUB_REF_NAME//\//-}
+          target=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/jamuphp:$tag
+          echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag jamuphp:8.4 "$target"
+          docker push "$target"
