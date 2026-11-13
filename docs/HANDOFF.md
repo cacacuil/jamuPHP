@@ -1048,8 +1048,8 @@ Horizon tidak jalan di sana.
   Akibatnya `gd`, `imagick`, `intl`, `redis`, dan `zip` belum diuji dengan situs sungguhan.
 - Belum di-deploy ke Dokploy sungguhan. Yang diuji adalah tiruannya (Traefik v3 + label).
 - Image diterbitkan CI ke GHCR setelah lulus uji asap: `main` menjadi
-  `ghcr.io/cacacuil/jamuphp:8.4`, branch `spike/x` menjadi `:spike-x`. Saat ini yang ada
-  baru `:spike-s1`, dan bisa ditarik tanpa login. Hanya amd64; arm64 belum.
+  `ghcr.io/cacacuil/jamuphp:8.4`, branch `spike/x` menjadi `:spike-x`. Keduanya bisa
+  ditarik tanpa login. Hanya amd64; arm64 belum.
 - Ukuran image 775 MB, 704 MB di antaranya image dasar `php:8.4-fpm` yang membawa compiler.
 - WordPress diuji dengan file inti di volume, dari luar image. Bila nanti situs WordPress
   di-deploy, usulnya image terpisah (`FROM jamuphp` + file inti) dengan `wp-content`
@@ -1065,8 +1065,7 @@ Horizon tidak jalan di sana.
 ### Langkah berikutnya
 
 1. Deploy satu situs di Dokploy dari image GHCR. Port container: 8080.
-2. Gabungkan `spike/s1` ke `main` supaya tag `:8.4` terbit.
-3. S2 (Windows) dan S4 (ukur ulang dengan MySQL dan cache halaman).
+2. S2 (Windows) dan S4 (ukur ulang dengan MySQL dan cache halaman).
 
 ## Sumber
 

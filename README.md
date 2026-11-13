@@ -36,12 +36,12 @@ HTTPS (misalnya Traefik di Dokploy). Port 8080, tidak ada yang berjalan sebagai 
 Untuk project Laravel atau PHP biasa, `Dockerfile` project cukup berisi:
 
 ```dockerfile
-FROM ghcr.io/cacacuil/jamuphp:spike-s1
+FROM ghcr.io/cacacuil/jamuphp:8.4
 COPY --chown=www-data:www-data . /app
 ```
 
-Image diterbitkan CI ke GHCR setelah lulus uji asap. Selama masih spike, tag-nya
-`spike-s1`; setelah masuk `main` menjadi `8.4`. Di Dokploy, arahkan domain ke port 8080.
+Image diterbitkan CI ke GHCR dari branch `main`, setelah lulus uji asap. Di Dokploy,
+arahkan domain ke port 8080.
 
 Membangun sendiri:
 
