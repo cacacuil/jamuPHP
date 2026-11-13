@@ -3,8 +3,9 @@
 Paket server PHP untuk development dan production: satu perintah mengenali project,
 lalu menyalakan dan mengawasi Caddy dan php-fpm. Tanpa file konfigurasi.
 
-Status: spike S1 dan S3. Kode ini sekali buang dan hanya berjalan di Linux. Rencana lengkap,
-hasil pengukuran, dan hasil uji ada di [docs/HANDOFF.md](docs/HANDOFF.md).
+Status: spike S1, S2, dan S3. Kode ini sekali buang. Berjalan di Linux (php-fpm) dan
+Windows (php-cgi dari zip resmi PHP). Rencana lengkap, hasil pengukuran, dan hasil uji ada
+di [docs/HANDOFF.md](docs/HANDOFF.md).
 
 ## Mencoba
 
@@ -27,6 +28,27 @@ Production, dengan sertifikat yang diterbitkan dan diperbarui otomatis:
 ```
 
 Bila `caddy` atau `php-fpm` tidak ada di `PATH`, tunjuk lewat `JAMU_CADDY` dan `JAMU_PHP_FPM`.
+
+## Windows
+
+Tidak ada yang perlu dipasang. Satu folder berisi `jamu.exe`, `caddy.exe`, dan folder `php`
+(isi zip NTS resmi dari windows.php.net) sudah cukup:
+
+```
+jamu.exe serve C:\path\ke\project
+```
+
+Rakitan seperti itu dibuat CI di setiap push dan bisa diunduh dari tab Actions, artifact
+`jamuphp-windows-php8.4`. Uji yang sama dengan Linux dijalankan di sana, ditambah uji
+khusus Windows:
+
+```bash
+bash tests/e2e.sh
+```
+
+```bash
+bash tests/windows.sh
+```
 
 ## Container
 

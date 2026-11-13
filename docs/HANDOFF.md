@@ -1,6 +1,6 @@
 # JamuPHP: handoff v2
 
-Tanggal: 13 November 2026, revisi 8. Menggantikan handoff v1 ("XAMPP berbasis Rust").
+Tanggal: 13 November 2026, revisi 9. Menggantikan handoff v1 ("XAMPP berbasis Rust").
 Nama produk: JamuPHP. Perintahnya `jamu`, file config-nya `jamu.toml`. Repositori:
 https://github.com/cacacuil/jamuphp (lisensi AGPL-3.0).
 
@@ -22,6 +22,9 @@ Spike S1 dikerjakan dan lulus (bagian 16). Posisi soal async dan extension Rust 
 (bagian 5, "Rakit, jangan bangun").
 Perubahan di revisi 8: spike S3 dikerjakan (bagian 17): image container, mode di belakang
 proxy, dan cara menangani extension PHP.
+Perubahan di revisi 9: spike S2 dikerjakan dan lulus (bagian 18): `jamu` yang sama berjalan
+di Windows dengan Caddy dan `php-cgi` dari zip resmi. Rencana "pool php-cgi buatan sendiri"
+dibatalkan karena `php-cgi` ternyata sudah mengurus pekerjanya sendiri di Windows.
 
 ## 1. Inti dalam satu menit
 
@@ -223,7 +226,7 @@ Rekomendasi: server sendiri. Keputusan soal `.htaccess` memperkuat pilihan ini.
 |---|---|---|
 | Web server | hyper | Di production cukup HTTP/1.1 karena TLS diakhiri Traefik. TLS lokal lewat rustls. |
 | PHP, Linux dan macOS | php-fpm | Satu proses fpm per versi, lewat unix socket. |
-| PHP, Windows | Pool `php-cgi.exe` | Satu proses melayani satu request; `PHP_FCGI_CHILDREN` tidak berlaku di Windows. Supervisor menjalankan N proses di port loopback, membagi request, dan menghidupkan ulang proses yang keluar setelah `PHP_FCGI_MAX_REQUESTS`. |
+| PHP, Windows | `php-cgi.exe` dengan `PHP_FCGI_CHILDREN` | Dikoreksi di revisi 9 (bagian 18): `PHP_FCGI_CHILDREN` berlaku di Windows. Satu proses induk di satu port loopback membuat pekerja, membagi satu soket ke semuanya, dan mengganti pekerja yang keluar setelah `PHP_FCGI_MAX_REQUESTS`. Supervisor hanya mengawasi induknya. |
 | Sambungan keduanya | Daftar alamat upstream FastCGI | Web server hanya tahu daftar alamat. Cara menyalakan proses berbeda per OS, kode routing sama. |
 | Supervisor | tokio | Windows: Job Object agar anak ikut mati. Unix: process group. Restart dengan jeda bertambah. Di container: PID 1, memanen zombie, meneruskan SIGTERM, menuntaskan request sebelum keluar. |
 | Penjadwal | Bawaan core | Menjalankan `schedule:run` Laravel dan `wp-cron.php` tanpa cron sistem. |
@@ -943,7 +946,7 @@ Satu file Rust (`src/main.rs`, sekitar 590 baris termasuk tes) dengan tiga depen
 1. S1 sisanya: jalankan `jamu serve --domain` di VPS dengan domain sungguhan terhadap
    staging Let's Encrypt, sebagai pengguna non-root.
 2. S3: sudah dikerjakan, lihat bagian 17. Sisanya adalah deploy di Dokploy sungguhan.
-3. S2: Windows dengan Caddy dan pool php-cgi.
+3. S2: sudah dikerjakan, lihat bagian 18.
 4. S4: ulangi pengukuran dengan MySQL dan cache halaman.
 
 Kode spike boleh dibuang. Yang dibawa ke fase 1 adalah aturan deteksi, isi konfigurasi
@@ -1065,7 +1068,147 @@ Horizon tidak jalan di sana.
 ### Langkah berikutnya
 
 1. Deploy satu situs di Dokploy dari image GHCR. Port container: 8080.
-2. S2 (Windows) dan S4 (ukur ulang dengan MySQL dan cache halaman).
+2. S2 sudah dikerjakan (bagian 18). Sisanya S4 (ukur ulang dengan MySQL dan cache halaman).
+
+## 18. Hasil spike S2: Windows
+
+### Yang dibuat
+
+- `jamu` yang sama, satu kode, berjalan di Windows. Semua yang berbeda antar-OS ada di satu
+  modul (`os`) dengan dua isi: Unix dan Windows. Sisanya (deteksi, Caddyfile, pengawasan,
+  urutan berhenti) tidak bercabang.
+- PHP dijalankan `php-cgi.exe` dari zip NTS resmi, sebagai server FastCGI di satu port
+  loopback. Caddy tetap lapisan web.
+- `php.ini` dibangkitkan ke folder state dan ditunjuk dengan `-c`, karena `php-cgi` tidak
+  mengenal `php_admin_value`. Zip resmi datang tanpa `php.ini`, jadi tidak satu pun
+  extension aktif; `jamu` menyalakan extension yang filenya ada di folder `ext`.
+- Binary dicari di samping `jamu.exe` lebih dulu, baru `PATH`. Satu folder berisi
+  `jamu.exe`, `caddy.exe`, dan `php\` langsung jalan tanpa pemasangan dan tanpa variabel.
+- `tests/e2e.sh`: 46 cek ujung ke ujung (PHP biasa, Laravel, WordPress), skrip yang sama
+  untuk Linux dan Windows. `tests/windows.sh`: 55 cek khusus Windows.
+  `tests/windows_stop.py`: berhenti dengan rapi.
+- CI: job `windows` (PHP 8.4 dan 8.5) merakit `jamu` + Caddy + zip resmi PHP, menjalankan
+  ketiga uji, lalu menyimpan rakitannya sebagai artifact `jamuphp-windows-php8.4` dan
+  `-php8.5` (56 MB) supaya bisa dicoba di Windows sungguhan.
+
+### Koreksi atas rencana: pool tidak perlu dibangun
+
+Bagian 5 menulis bahwa `PHP_FCGI_CHILDREN` tidak berlaku di Windows, sehingga supervisor
+harus menjalankan N proses di N port, membagi permintaan, dan mengganti proses yang keluar.
+Itu salah. Kode `sapi/cgi/cgi_main.c` (cabang PHP-8.4) punya jalur Windows sendiri: proses
+induk membuat pekerja dengan `CreateProcess`, mewariskan soket dengar ke semuanya,
+memasukkan mereka ke Job Object dengan `KILL_ON_JOB_CLOSE`, dan mengganti pekerja yang
+keluar.
+
+Akibatnya rancangan menjadi lebih sederhana daripada rencana:
+
+- Satu upstream di Caddy, bukan daftar alamat dengan pembagi beban.
+- Permintaan yang melebihi jumlah pekerja antre di soket, tidak ditolak.
+- Saat pekerja didaur ulang, soket tetap dipegang induk. Tidak ada jeda "port tertutup".
+- Supervisor tetap mengawasi dua proses, sama seperti di Linux.
+
+Kode pool yang sudah dirancang tidak jadi ditulis. Ini "rakit, jangan bangun" yang nyaris
+terlewat: sumbernya dibaca dulu sebelum menulis.
+
+### Hasil
+
+Diuji di GitHub Actions `windows-latest` (4 core), Caddy 2.11.9, PHP 8.4.27 dan 8.5.12.
+Angka kedua versi PHP nyaris sama; yang ditulis di sini PHP 8.4.
+
+| Yang diuji | Hasil |
+|---|---|
+| Uji ujung ke ujung yang sama dengan Linux: PHP biasa, Laravel 13, WordPress + SQLite | 45 lulus; satu cek (hanya loopback) dipindah ke uji khusus Windows |
+| Folder project bernama `Situs Saya é` (spasi dan huruf non-ASCII) | Jalan |
+| Unggah 100 MB, isi sama; 200 MB | 200; 413 |
+| Streaming | Byte pertama di bawah 1 detik |
+| Mulai sampai siap | 0,8 sampai 1,0 detik |
+| Extension | 22 menyala, termasuk curl, gd, intl, mbstring, exif, mysqli, pdo_mysql, pdo_pgsql, pdo_sqlite, sodium, zip |
+| opcache | Aktif dan dipakai bersama semua pekerja (6032 hit terbaca dari satu pekerja) |
+| 6000 permintaan, 16 sekaligus | Semua 200 dalam 3,7 detik. 14 PID pekerja berbeda: daur ulang tiap 500 permintaan tidak menjatuhkan satu permintaan pun |
+| 24 permintaan 0,7 detik sekaligus, 4 pekerja | Semua 200 dalam 5,0 detik: antre, tidak ditolak |
+| Induk `php-cgi` dimatikan; Caddy dimatikan | 200 lagi dalam 5 detik |
+| `jamu` dimatikan paksa (`taskkill /F`) | `caddy.exe` dan `php-cgi.exe` ikut mati |
+| Ctrl-Break saat permintaan 3 detik sedang berjalan | Permintaan selesai dengan 200, `jamu` keluar kode 0 dalam 2,7 detik, tidak ada proses tertinggal |
+| Alamat lain milik mesin itu (bukan loopback) | Tidak bisa terhubung |
+| Port sudah dipakai | Keluar dengan pesan yang menyebut portnya |
+| Perubahan file PHP | Langsung terlihat di permintaan berikutnya |
+| Memori diam | `php-cgi` 5 proses 138 MB, Caddy 33 MB, `jamu` 4 MB |
+| 30 URL yang mencoba membaca sumber PHP atau dotfile | Tidak ada yang bocor (lihat di bawah) |
+
+### Sumber PHP dan dotfile: 30 URL, tidak ada yang bocor
+
+Bagian 8 mencatat keanehan nama file Windows sebagai tes wajib. Semuanya dicoba terhadap
+situs yang file PHP-nya memuat penanda rahasia:
+
+- `/INDEX.PHP`, `/index.pHp`, `/index.php.`, `/index.php..`, `/index.php%20`: dijalankan
+  PHP, bukan disajikan sebagai file.
+- `/index.php::$DATA` dan variasinya: Caddy tidak menemukannya sebagai file, permintaan
+  jatuh ke `index.php` seperti URL biasa.
+- Nama pendek ala DOS. Volume itu memang membuatnya: `.env` punya nama kedua `ENV~1`,
+  `.git` menjadi `GIT~1`. Caddy menjawab 400 untuk `/ENV~1`, `/GIT~1/config`, dan
+  `/KONFIG~1.PHP`.
+- `/.env`, `/.ENV`, `/.env.`, `/.env%20`, `/.env::$DATA`, `/.git/config`, `/.GIT/config`: 404.
+- PHP di folder unggahan WordPress, termasuk `X.PHP`, `x.php.`, `x.php%20`, `x.php/y`,
+  dan `/WP-CONTENT/UPLOADS/x.php`: 403, tidak dijalankan.
+
+Perlindungan ini hampir seluruhnya milik Caddy, bukan kode kita. Satu yang kita tambah:
+aturan folder unggahan kini juga menolak `.php` yang diikuti titik atau spasi, karena
+Windows menganggap `x.php.` sama dengan `x.php`. Itu ditutup sebelum diuji, jadi tidak
+terbukti bahwa tanpa itu bisa dieksploitasi.
+
+### Temuan
+
+1. **HTTPS dari PHP gagal di zip resmi.** `curl` menjawab "unable to get local issuer
+   certificate" karena zip itu tidak membawa daftar CA. `file_get_contents` berhasil,
+   sebab stream OpenSSL di Windows memakai penyimpanan sertifikat sistem. Dengan
+   `cacert.pem` di `php\extras\ssl\`, `jamu` mengisi `curl.cainfo` dan `openssl.cafile`,
+   dan keduanya berhasil. Distribusi Windows harus membawa `cacert.pem`; tanpa itu klien
+   HTTP Laravel (Guzzle) gagal pada permintaan HTTPS pertama.
+2. **Memori adalah harga Windows.** `php-cgi` tidak punya mode ondemand: semua pekerja
+   hidup terus, sekitar 27 MB per proses. Delapan pekerja diam memakai 247 MB, jadi
+   jumlahnya dijadikan 4 sampai 8 mengikuti jumlah core (138 MB di mesin 4 core). Di
+   Linux dengan php-fpm ondemand angkanya 21 MB.
+3. **opcache menahan perubahan kode sampai 2 detik.** Di mode dev sekarang diperiksa di
+   setiap permintaan, di kedua OS.
+4. **PHP 8.5 tidak punya `php_opcache.dll`** karena opcache sudah menyatu. Aturan "nyalakan
+   bila filenya ada" bekerja untuk 8.4 dan 8.5 tanpa cabang per versi.
+5. **Spasi di dalam regex memotong token Caddyfile.** `[. ]` membuat aturan folder
+   unggahan cocok dengan semua URL, dan seluruh situs WordPress menjawab 403. Ketahuan
+   oleh uji ujung ke ujung dalam hitungan menit. Spasi ditulis `\x20`.
+
+### Yang belum, dan keterbatasan
+
+- Hanya diuji di runner CI (Windows Server), belum di Windows 10 atau 11. Antivirus,
+  SmartScreen, dan dialog firewall belum pernah dilihat. Mode dev hanya mengikat loopback
+  dan tidak lagi menyentuh `0.0.0.0` saat memeriksa port, jadi dialog firewall seharusnya
+  tidak muncul; itu dugaan sampai ada yang melihatnya.
+- Ctrl-C di jendela terminal sungguhan dan menutup jendelanya belum diuji. Yang diuji
+  adalah Ctrl-Break dari proses lain, yang memakai penangan yang sama.
+- Nama pengguna Windows dengan spasi atau huruf non-ASCII (jalur negatif A5) belum diuji:
+  folder state ada di `%LOCALAPPDATA%\jamuphp`. Yang diuji baru path project. Path lebih
+  dari 260 karakter juga belum.
+- Port `php-cgi` dipilih dengan mengikat port 0 lalu melepasnya. Ada celah sempit proses
+  lain merebut port itu sebelum `php-cgi` mengikatnya; akibatnya `php-cgi` gagal start dan
+  diulang dengan port yang sama.
+- `jamu health` hanya untuk php-fpm. `php-cgi` tidak punya ping.
+- Pekerja `php-cgi` tidak punya stderr. Pesan galat PHP lewat FastCGI ke log Caddy;
+  tampilannya belum diperiksa.
+- `--domain` dan `--behind-proxy` tidak diuji di Windows. Windows hanya target dev.
+- Extension tambahan lewat PIE, Xdebug, dan ionCube belum disentuh.
+- `cacert.pem` di rakitan CI diunduh dari curl.se saat CI berjalan. Cara membawanya di
+  distribusi (dan memperbaruinya) belum diputuskan.
+- Rakitan belum bertanda tangan dan belum berupa installer. Windows arm64 belum.
+- `tests/e2e.sh` di Linux baru dijalankan di sandbox (lulus 46 untuk php-fpm, dan 46 untuk
+  `php-cgi` lewat `JAMU_PHP_CGI`). Di CI, Linux baru diuji lewat tes unit dan uji asap image.
+
+### Langkah berikutnya
+
+1. Owner mencoba rakitan di Windows 10 atau 11: unduh artifact `jamuphp-windows-php8.4`
+   dari run CI terakhir, ekstrak, lalu `jamu.exe serve C:\path\ke\project`. Yang perlu
+   dilihat: dialog firewall, antivirus, dan Ctrl-C.
+2. Sisa S3 (deploy di Dokploy) dan sisa S1 (domain sungguhan).
+3. S4: ukur ulang dengan MySQL dan cache halaman. Setelah itu keempat spike selesai dan
+   fase 1 bisa dimulai.
 
 ## Sumber
 
