@@ -1039,10 +1039,11 @@ Horizon tidak jalan di sana.
 
 ### Yang belum, dan keterbatasan
 
-- **Langkah pemasangan extension di `Dockerfile` belum pernah dijalankan.** Sandbox
-  pengujian memblokir repo Debian dan PECL. Image uji dibangun dengan Dockerfile yang sama
-  kecuali satu baris: `docker-php-ext-install bcmath exif mysqli pdo_mysql`, yang tidak butuh
-  unduhan. Build penuh diuji oleh CI.
+- Build penuh dengan semua extension hanya diuji di CI (GitHub Actions, lulus bersama uji
+  asap yang memeriksa setiap extension). Sandbox pengujian memblokir repo Debian dan PECL,
+  jadi uji Traefik, WordPress, dan jalur negatif di atas memakai image dengan Dockerfile
+  yang sama kecuali satu baris: `docker-php-ext-install bcmath exif mysqli pdo_mysql`.
+  Akibatnya `gd`, `imagick`, `intl`, `redis`, dan `zip` belum diuji dengan situs sungguhan.
 - Belum di-deploy ke Dokploy sungguhan. Yang diuji adalah tiruannya (Traefik v3 + label).
 - Image belum diterbitkan ke registry mana pun.
 - Ukuran image 775 MB, 704 MB di antaranya image dasar `php:8.4-fpm` yang membawa compiler.
@@ -1058,10 +1059,9 @@ Horizon tidak jalan di sana.
 
 ### Langkah berikutnya
 
-1. Lihat hasil CI: apakah build penuh dengan semua extension lulus.
-2. Putuskan registry (misalnya GHCR) dan terbitkan image, lalu deploy satu situs di Dokploy.
-3. Putuskan cara file inti WordPress sampai ke container.
-4. S2 (Windows) dan S4 (ukur ulang dengan MySQL dan cache halaman).
+1. Putuskan registry (misalnya GHCR) dan terbitkan image, lalu deploy satu situs di Dokploy.
+2. Putuskan cara file inti WordPress sampai ke container.
+3. S2 (Windows) dan S4 (ukur ulang dengan MySQL dan cache halaman).
 
 ## Sumber
 
