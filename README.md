@@ -33,15 +33,20 @@ Bila `caddy` atau `php-fpm` tidak ada di `PATH`, tunjuk lewat `JAMU_CADDY` dan `
 Image berisi `jamu`, Caddy, dan php-fpm, untuk dipakai di belakang proxy yang mengurus
 HTTPS (misalnya Traefik di Dokploy). Port 8080, tidak ada yang berjalan sebagai root.
 
-```bash
-docker build -t jamuphp:8.4 .
-```
-
 Untuk project Laravel atau PHP biasa, `Dockerfile` project cukup berisi:
 
 ```dockerfile
-FROM jamuphp:8.4
+FROM ghcr.io/cacacuil/jamuphp:spike-s1
 COPY --chown=www-data:www-data . /app
+```
+
+Image diterbitkan CI ke GHCR setelah lulus uji asap. Selama masih spike, tag-nya
+`spike-s1`; setelah masuk `main` menjadi `8.4`. Di Dokploy, arahkan domain ke port 8080.
+
+Membangun sendiri:
+
+```bash
+docker build -t jamuphp:8.4 .
 ```
 
 Uji asap image:
