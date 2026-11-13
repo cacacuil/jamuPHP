@@ -1,6 +1,6 @@
 # JamuPHP: handoff v2
 
-Tanggal: 13 November 2026, revisi 7. Menggantikan handoff v1 ("XAMPP berbasis Rust").
+Tanggal: 13 November 2026, revisi 8. Menggantikan handoff v1 ("XAMPP berbasis Rust").
 Nama produk: JamuPHP. Perintahnya `jamu`, file config-nya `jamu.toml`. Repositori:
 https://github.com/cacacuil/jamuphp (lisensi AGPL-3.0).
 
@@ -20,6 +20,8 @@ sebagai server terdepan pada ribuan koneksi. Rekomendasi lapisan web berubah men
 Perubahan di revisi 7: owner memutuskan Caddy di semua tempat dan memberi nama JamuPHP.
 Spike S1 dikerjakan dan lulus (bagian 16). Posisi soal async dan extension Rust dicatat
 (bagian 5, "Rakit, jangan bangun").
+Perubahan di revisi 8: spike S3 dikerjakan (bagian 17): image container, mode di belakang
+proxy, dan cara menangani extension PHP.
 
 ## 1. Inti dalam satu menit
 
@@ -938,12 +940,128 @@ Satu file Rust (`src/main.rs`, sekitar 590 baris termasuk tes) dengan tiga depen
 
 1. S1 sisanya: jalankan `jamu serve --domain` di VPS dengan domain sungguhan terhadap
    staging Let's Encrypt, sebagai pengguna non-root.
-2. S3: image container berisi `jamu`, Caddy, dan php-fpm; satu situs di Dokploy.
+2. S3: sudah dikerjakan, lihat bagian 17. Sisanya adalah deploy di Dokploy sungguhan.
 3. S2: Windows dengan Caddy dan pool php-cgi.
 4. S4: ulangi pengukuran dengan MySQL dan cache halaman.
 
 Kode spike boleh dibuang. Yang dibawa ke fase 1 adalah aturan deteksi, isi konfigurasi
 Caddy dan php-fpm, serta empat temuan di atas sebagai tes.
+
+## 17. Hasil spike S3: image container
+
+### Yang dibuat
+
+- `Dockerfile`: image resmi `php:8.4-fpm`, ditambah Caddy dan `jamu`. Tidak ada yang
+  berjalan sebagai root. `jamu` adalah PID 1.
+- `jamu serve --behind-proxy`: HTTP di semua antarmuka, port 8080, untuk container di
+  belakang Traefik. Ini mode ketiga, di samping dev (loopback) dan `--domain` (memegang 443).
+- `jamu health`: dipakai `HEALTHCHECK`. Lulus hanya bila Caddy menerima koneksi dan php-fpm
+  menjawab ping. Path ping hanya dijawab untuk permintaan dari loopback.
+- `tests/image.sh`: uji asap image. `.github/workflows/ci.yml`: tes supervisor, build
+  image, dan uji asap di setiap push.
+
+Pemakaian untuk Laravel atau PHP biasa cukup dua baris:
+
+```dockerfile
+FROM jamuphp:8.4
+COPY --chown=www-data:www-data . /app
+```
+
+### Di belakang proxy tanpa menyentuh config situs
+
+HTTPS berakhir di Traefik, jadi PHP melihat HTTP biasa. Tanpa penanganan, WordPress
+berputar-putar dalam redirect dan Laravel membuat URL `http://`. Jalan keluarnya ada di
+konfigurasi Caddy yang dibangkitkan:
+
+- Bila `X-Forwarded-Proto: https` datang dari alamat jaringan privat, PHP menerima
+  `HTTPS=on`. Dari alamat lain header itu diabaikan.
+- `REMOTE_ADDR` diisi alamat pengunjung, diambil dari `X-Forwarded-For` hanya bila
+  pengirimnya proxy di jaringan privat.
+
+Hasilnya `wp-config.php` dan `TrustProxies` Laravel tidak perlu disentuh.
+
+### Yang terbukti (Docker 29.9, Traefik v3, PHP 8.4.27, MariaDB 11)
+
+Lingkungan uji meniru Dokploy: Traefik v3 dengan HTTPS di jaringan `dokploy-network`,
+routing lewat label container ke port 8080.
+
+| Uji | Hasil |
+|---|---|
+| Laravel 13 lewat Traefik | HTTP/2, `/up` 200, `url()` menghasilkan `https://`, `request()->secure()` benar, sesi, SQLite |
+| WordPress 7.2-beta + MariaDB lewat Traefik | Instalasi, halaman depan (semua URL `https://`), login (cookie `Secure`), dashboard tanpa redirect berulang, permalink cantik, REST API |
+| Permintaan ke port HTTP Traefik | WordPress mengalihkan ke `https://` |
+| Upload 100 MB lewat Traefik | 0,35 detik, hash cocok. 200 MB ditolak 413 |
+| Respons dialirkan lewat Traefik | Byte pertama 0,007 detik dari respons 2 detik |
+| `.env`, PHP di folder upload | 404 dan 403 |
+| Path ping dari luar | Tidak dijawab php-fpm; jatuh ke situs (404) |
+| Master php-fpm atau Caddy di-`kill -9` | Kembali 200 dalam 1,7 detik, tidak ada zombie |
+| Proses latar yatim dari kode situs | Dipungut `jamu` setelah selesai, tidak ada zombie |
+| `docker stop` | 0,24 detik, kode keluar 0 |
+| `docker stop` saat ada permintaan 3 detik | Permintaan selesai 200, lalu container berhenti |
+| `docker stop` saat ada permintaan 30 detik | Diputus setelah 8 detik, kode keluar 0, tetap di bawah batas 10 detik Docker |
+| Container baru | Sehat dan dirutekan Traefik 2,6 detik setelah `docker start` |
+| Caddy dibekukan | Container `unhealthy` setelah 36 detik, Traefik berhenti merutekan (404); pulih sendiri setelah dicairkan |
+| Filesystem read-only, atau UID sembarang | Jalan; konfigurasi pindah ke `/tmp/jamuphp-<uid>` |
+| Read-only tanpa `/tmp` yang bisa ditulis | Berhenti dengan pesan yang menyebut jalan keluarnya |
+| Volume WordPress milik root | Peringatan saat start: `wp-content` tidak bisa ditulis oleh uid 33 |
+| Memori diam (`docker stats`) | Laravel 21 MiB, WordPress 50 MiB setelah dipakai |
+
+### Yang ditemukan dan diperbaiki
+
+1. Image resmi PHP memasang `STOPSIGNAL SIGQUIT`. `jamu` sebagai PID 1 tidak menanganinya,
+   sehingga `docker stop` menunggu 10 detik lalu membunuh paksa (kode 137). Dockerfile
+   sekarang memasang `STOPSIGNAL SIGTERM`.
+2. Saat berhenti, Caddy dan php-fpm dihentikan bersamaan, jadi permintaan yang sedang
+   berjalan dijawab 502. Sekarang berurutan: Caddy menghabiskan permintaan dulu, baru
+   php-fpm dihentikan.
+3. Sebagai PID 1, `jamu` mewarisi proses yatim. Sekarang ia memungutnya.
+4. Caddy mencoba menulis ke `HOME`, yang di container tidak bisa ditulis. Folder data dan
+   config Caddy sekarang diarahkan ke folder state.
+5. php-fpm tidak mengenali ping karena Caddy mengirim `SCRIPT_NAME` kosong untuk path
+   tanpa `.php`. Nilainya sekarang diisi terang-terangan.
+
+### Extension PHP
+
+Tiga lapis, urut dari yang paling sering dipakai:
+
+1. Satu set tetap yang semuanya aktif, gabungan kebutuhan WordPress dan Laravel. Di image:
+   `bcmath exif gd igbinary imagick intl mysqli pdo_mysql pdo_pgsql redis zip`, di atas
+   bawaan image resmi (curl, dom, fileinfo, mbstring, openssl, pdo_sqlite, sodium, opcache).
+   Dipasang dengan `install-php-extensions`.
+2. Pemeriksaan sebelum start: `ext-*` di `composer.json` dan `composer.lock` dibandingkan
+   dengan modul yang termuat. Belum dibuat; usulnya masuk fase 1.
+3. Pintu keluar: `ARG PHP_EXTENSIONS` saat build image, atau PHP sendiri lewat `JAMU_PHP_FPM`.
+
+Di Windows sumbernya binary resmi NTS, dan extension tambahan lewat PIE, yang mengunduh DLL
+jadi. Build PHP sendiri (StaticPHP) ditunda; build statis penuh tidak bisa memuat extension
+tambahan. Xdebug dikirim tapi mati. `pcntl` dan `posix` tidak ada di Windows, jadi Laravel
+Horizon tidak jalan di sana.
+
+### Yang belum, dan keterbatasan
+
+- **Langkah pemasangan extension di `Dockerfile` belum pernah dijalankan.** Sandbox
+  pengujian memblokir repo Debian dan PECL. Image uji dibangun dengan Dockerfile yang sama
+  kecuali satu baris: `docker-php-ext-install bcmath exif mysqli pdo_mysql`, yang tidak butuh
+  unduhan. Build penuh diuji oleh CI.
+- Belum di-deploy ke Dokploy sungguhan. Yang diuji adalah tiruannya (Traefik v3 + label).
+- Image belum diterbitkan ke registry mana pun.
+- Ukuran image 775 MB, 704 MB di antaranya image dasar `php:8.4-fpm` yang membawa compiler.
+- WordPress diuji dengan file inti di volume. Cara file inti WordPress sampai ke container
+  (image sendiri, atau unduh saat start) belum diputuskan.
+- `HEALTHCHECK` tiap 10 detik membuat satu pekerja php-fpm tetap hidup, jadi "ondemand"
+  tidak pernah turun ke nol pekerja di container.
+- Perlu 36 detik sampai container dinyatakan `unhealthy`. Bisa dipercepat dengan interval
+  lebih pendek.
+- `X-Forwarded-Proto` dipercaya dari semua alamat privat, termasuk container lain di
+  jaringan Docker yang sama.
+- Belum ada batas CPU atau memori per situs; itu diatur di Dokploy.
+
+### Langkah berikutnya
+
+1. Lihat hasil CI: apakah build penuh dengan semua extension lulus.
+2. Putuskan registry (misalnya GHCR) dan terbitkan image, lalu deploy satu situs di Dokploy.
+3. Putuskan cara file inti WordPress sampai ke container.
+4. S2 (Windows) dan S4 (ukur ulang dengan MySQL dan cache halaman).
 
 ## Sumber
 
@@ -960,6 +1078,9 @@ Caddy dan php-fpm, serta empat temuan di atas sebagai tes.
 - Rapira: https://www.besthub.dev/articles/rapira-rust-powered-php-server-hits-111k-rps-10x-faster-than-php-fpm-a13f541ee993
 - Laragon: https://laragon.org/docs/faq.html dan https://laragon.org/pricing
 - Herd: https://herd.laravel.com/
+- PIE: https://php.github.io/pie
+- StaticPHP, build glibc: https://static-php.github.io/v2-docs/en/guide/build-with-glibc.html
+- ionCube Loader: https://www.ioncube.com/loaders.php
 - EnvKit: https://laravel-news.com/envkit-a-local-development-stack-for-laravel-on-windows-and-macos
 - ServBay: https://servbay.com/features
 - Azure Artifact Signing: https://learn.microsoft.com/azure/artifact-signing/quickstart

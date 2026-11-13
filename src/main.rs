@@ -78,31 +78,40 @@ struct Opts {
     email: Option<String>,
     acme_ca: Option<String>,
     acme_ca_root: Option<String>,
+    behind_proxy: bool,
 }
 
 const USAGE: &str = "\
 Pemakaian:
   jamu serve [DIR] [--port N]
   jamu serve [DIR] --domain NAMA [--email ALAMAT] [--acme-ca URL] [--acme-ca-root FILE]
+  jamu serve [DIR] --behind-proxy [--port N]
+  jamu health [--port N]
   jamu detect [DIR]
 
-Tanpa --domain: HTTP di 127.0.0.1, port 8080 atau port bebas berikutnya.
-Dengan --domain: port 80 dan 443, sertifikat diterbitkan dan diperbarui otomatis.";
+Tanpa opsi: HTTP di 127.0.0.1, port 8080 atau port bebas berikutnya.
+Dengan --domain: port 80 dan 443, sertifikat diterbitkan dan diperbarui otomatis.
+Dengan --behind-proxy: HTTP di semua antarmuka, port 8080, untuk container di belakang
+Traefik atau proxy lain yang mengurus HTTPS.";
 
 fn parse_opts(args: &[String]) -> Result<Opts, String> {
-    let mut o = Opts { dir: PathBuf::from("."), port: None, domain: None, email: None, acme_ca: None, acme_ca_root: None };
+    let mut o = Opts { dir: PathBuf::from("."), port: None, domain: None, email: None, acme_ca: None, acme_ca_root: None, behind_proxy: false };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = |name: &str| it.next().cloned().ok_or(format!("{name} butuh nilai"));
         match a.as_str() {
             "--port" => o.port = Some(val("--port")?.parse().map_err(|_| "--port harus angka 1-65535")?),
             "--domain" => o.domain = Some(val("--domain")?),
+            "--behind-proxy" => o.behind_proxy = true,
             "--email" => o.email = Some(val("--email")?),
             "--acme-ca" => o.acme_ca = Some(val("--acme-ca")?),
             "--acme-ca-root" => o.acme_ca_root = Some(val("--acme-ca-root")?),
             s if s.starts_with("--") => return Err(format!("opsi tidak dikenal: {s}")),
             s => o.dir = PathBuf::from(s),
         }
+    }
+    if o.behind_proxy && o.domain.is_some() {
+        return Err("--behind-proxy dan --domain tidak bisa dipakai bersamaan: pilih siapa yang mengurus HTTPS".into());
     }
     o.dir = fs::canonicalize(&o.dir).map_err(|e| format!("folder {} tidak bisa dibuka: {e}", o.dir.display()))?;
     if !o.dir.is_dir() {
@@ -136,11 +145,15 @@ fn fnv1a(bytes: &[u8]) -> u32 {
 }
 
 /// Folder state berada di luar project, supaya tidak ikut tersaji dan tidak mengotori repo.
-fn state_dir(project: &Path) -> PathBuf {
-    let base = env::var_os("XDG_STATE_HOME")
+fn state_base() -> PathBuf {
+    env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("jamuphp")
+}
+
+fn state_dir(base: &Path, project: &Path) -> PathBuf {
     let name: String = project
         .file_name()
         .map(|n| n.to_string_lossy().to_lowercase())
@@ -149,7 +162,7 @@ fn state_dir(project: &Path) -> PathBuf {
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
     let hash = fnv1a(project.as_os_str().as_encoded_bytes());
-    base.join("jamuphp").join(format!("{name}-{hash:08x}"))
+    base.join(format!("{name}-{hash:08x}"))
 }
 
 fn port_free(port: u16) -> bool {
@@ -195,6 +208,10 @@ struct Paths {
     sock: PathBuf,
 }
 
+/// Dijawab php-fpm sendiri ("pong"), tanpa menjalankan kode situs. Caddy hanya meneruskannya
+/// untuk permintaan dari loopback, jadi `jamu health` menguji Caddy dan php-fpm sekaligus.
+const PING_PATH: &str = "/-/jamu/ping";
+
 fn workers() -> usize {
     // Dua kali jumlah core, minimal 4 supaya permintaan WordPress ke dirinya sendiri tidak macet.
     (thread::available_parallelism().map(|n| n.get()).unwrap_or(2) * 2).max(4)
@@ -210,6 +227,7 @@ fn fpm_conf(sock: &Path, dev: bool) -> String {
     s += &format!("listen = {}\nlisten.mode = 0600\n", sock.display());
     s += &format!("pm = ondemand\npm.max_children = {}\npm.process_idle_timeout = 10s\n", workers());
     s += "catch_workers_output = yes\ndecorate_workers_output = no\nclear_env = no\n";
+    s += &format!("ping.path = {PING_PATH}\n");
     s += "php_admin_value[memory_limit] = 256M\n";
     s += "php_admin_value[upload_max_filesize] = 128M\n";
     s += "php_admin_value[post_max_size] = 128M\n";
@@ -225,6 +243,16 @@ fn caddyfile(p: &Project, o: &Opts, port: u16, state: &Path, sock: &Path) -> Str
     let mut s = String::from("{\n\tadmin off\n\tpersist_config off\n");
     s += &format!("\tstorage file_system {}\n", q(&state.join("caddy")));
     s += "\tlog {\n\t\tlevel WARN\n\t}\n";
+    if o.domain.is_none() {
+        // Tanpa TLS hanya HTTP/1.1 yang berlaku; menyebutnya terang-terangan membungkam
+        // peringatan Caddy soal HTTP/2 dan HTTP/3 di setiap start.
+        s += "\tservers {\n\t\tprotocols h1\n";
+        if o.behind_proxy {
+            // Alamat klien diambil dari X-Forwarded-For hanya bila pengirimnya proxy di jaringan privat.
+            s += "\t\ttrusted_proxies static private_ranges\n";
+        }
+        s += "\t}\n";
+    }
     match &o.domain {
         None => s += "\tauto_https off\n",
         Some(_) => {
@@ -243,6 +271,7 @@ fn caddyfile(p: &Project, o: &Opts, port: u16, state: &Path, sock: &Path) -> Str
 
     match &o.domain {
         // Dev hanya mendengarkan di loopback: situs lokal tidak boleh terbuka ke jaringan.
+        None if o.behind_proxy => s += &format!("http://:{port} {{\n"),
         None => s += &format!("http://:{port} {{\n\tbind 127.0.0.1\n"),
         Some(d) => s += &format!("{d} {{\n"),
     }
@@ -253,10 +282,27 @@ fn caddyfile(p: &Project, o: &Opts, port: u16, state: &Path, sock: &Path) -> Str
     if p.kind == Kind::WordPress {
         s += "\t@uploads_php path_regexp (?i)^/wp-content/uploads/.*\\.php(/|$)\n\trespond @uploads_php 403\n";
     }
+    let upstream = q(Path::new(&format!("unix/{}", sock.display())));
+    s += &format!("\t@ping {{\n\t\tpath {PING_PATH}\n\t\tremote_ip 127.0.0.1 ::1\n\t}}\n");
+    // php-fpm mengenali ping dari SCRIPT_NAME; tanpa split_path Caddy mengirimnya kosong.
+    s += &format!(
+        "\treverse_proxy @ping {upstream} {{\n\t\ttransport fastcgi {{\n\t\t\tenv SCRIPT_NAME {PING_PATH}\n\t\t\tenv SCRIPT_FILENAME {PING_PATH}\n\t\t}}\n\t}}\n"
+    );
     s += "\tencode zstd gzip\n";
     // flush_interval -1: keluaran PHP diteruskan saat itu juga, tidak ditampung dulu.
     // Tanpa ini respons yang dialirkan (SSE, unduhan yang dibangkitkan) baru tiba setelah selesai.
-    s += &format!("\tphp_fastcgi {} {{\n\t\tflush_interval -1\n\t}}\n", q(Path::new(&format!("unix/{}", sock.display()))));
+    if o.behind_proxy {
+        // HTTPS berakhir di proxy. Tanpa HTTPS=on, WordPress mengira situsnya HTTP lalu
+        // berputar-putar dalam redirect. Hanya dipercaya bila pengirimnya di jaringan privat.
+        // REMOTE_ADDR diisi alamat pengunjung, bukan alamat proxy.
+        s += "\t@fwd_https {\n\t\theader X-Forwarded-Proto https\n\t\tremote_ip private_ranges\n\t}\n";
+        s += &format!(
+            "\tphp_fastcgi @fwd_https {upstream} {{\n\t\tflush_interval -1\n\t\tenv HTTPS on\n\t\tenv REMOTE_ADDR {{client_ip}}\n\t}}\n"
+        );
+        s += &format!("\tphp_fastcgi {upstream} {{\n\t\tflush_interval -1\n\t\tenv REMOTE_ADDR {{client_ip}}\n\t}}\n");
+    } else {
+        s += &format!("\tphp_fastcgi {upstream} {{\n\t\tflush_interval -1\n\t}}\n");
+    }
     s += "\tfile_server\n}\n";
     s
 }
@@ -291,6 +337,11 @@ fn spawn(name: &'static str, mut cmd: Command) -> std::io::Result<Child> {
 fn caddy_cmd(p: &Paths) -> Command {
     let mut c = Command::new(&p.caddy);
     c.args(["run", "--adapter", "caddyfile", "--config"]).arg(&p.caddyfile);
+    // Caddy menyimpan catatan kecil di folder data dan config pengguna. Arahkan ke folder
+    // state supaya tidak menyentuh HOME, yang di container sering tidak bisa ditulis.
+    if let Some(state) = p.caddyfile.parent() {
+        c.env("XDG_DATA_HOME", state.join("caddy-data")).env("XDG_CONFIG_HOME", state.join("caddy-config"));
+    }
     c
 }
 
@@ -316,6 +367,25 @@ struct Service {
 
 fn signal_group(child: &Child, sig: i32) {
     unsafe { libc::kill(-(child.id() as i32), sig) };
+}
+
+/// Sebagai PID 1 di container, proses yatim (misalnya pekerja php-fpm yang induknya mati,
+/// atau proses latar yang dijalankan kode situs) menjadi anak kita. Tanpa dipungut, mereka
+/// menumpuk sebagai zombie. Anak milik kita sendiri dilewati: itu urusan `try_wait`.
+fn reap_orphans(ours: &[u32]) {
+    if unsafe { libc::getpid() } != 1 {
+        return;
+    }
+    loop {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // WNOWAIT: intip dulu siapa yang selesai, tanpa memungutnya.
+        let r = unsafe { libc::waitid(libc::P_ALL, 0, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) };
+        let pid = unsafe { info.si_pid() };
+        if r != 0 || pid == 0 || ours.contains(&(pid as u32)) {
+            return;
+        }
+        unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+    }
 }
 
 fn supervise(paths: &Paths, stop: &AtomicBool, ready: impl FnOnce()) -> Result<(), String> {
@@ -363,6 +433,7 @@ fn supervise(paths: &Paths, stop: &AtomicBool, ready: impl FnOnce()) -> Result<(
                 None => {}
             }
         }
+        reap_orphans(&services.iter().filter_map(|s| s.child.as_ref().map(Child::id)).collect::<Vec<_>>());
         if services.iter().all(|s| s.child.is_some()) {
             if let Some(f) = ready.take() {
                 f();
@@ -372,22 +443,21 @@ fn supervise(paths: &Paths, stop: &AtomicBool, ready: impl FnOnce()) -> Result<(
     }
 
     say!("jamu: berhenti...");
-    for s in services.iter().rev() {
-        if let Some(child) = &s.child {
-            unsafe { libc::kill(child.id() as i32, s.stop_signal) };
-        }
-    }
-    let deadline = Instant::now() + Duration::from_secs(10);
-    for s in services.iter_mut() {
+    // Berurutan, Caddy dulu: ia berhenti menerima koneksi baru dan menunggu permintaan yang
+    // sedang berjalan, sementara php-fpm masih hidup untuk menyelesaikannya. Baru setelah itu
+    // php-fpm dihentikan. Total 9 detik, di bawah batas 10 detik bawaan `docker stop`.
+    let start = Instant::now();
+    for (s, budget) in services.iter_mut().rev().zip([8, 9]) {
         let Some(child) = &mut s.child else { continue };
+        unsafe { libc::kill(child.id() as i32, s.stop_signal) };
         while child.try_wait().ok().flatten().is_none() {
-            if Instant::now() > deadline {
-                say!("jamu: {} tidak mau berhenti; dimatikan paksa", s.name);
+            if start.elapsed() > Duration::from_secs(budget) {
+                say!("jamu: {} belum selesai setelah {budget} detik; dimatikan paksa", s.name);
                 signal_group(child, libc::SIGKILL);
                 let _ = child.wait();
                 break;
             }
-            thread::sleep(Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(20));
         }
     }
     let _ = fs::remove_file(&paths.sock);
@@ -401,6 +471,27 @@ fn kind_name(k: Kind) -> &'static str {
         Kind::Laravel => "Laravel",
         Kind::WordPress => "WordPress",
         Kind::Php => "PHP",
+    }
+}
+
+/// Folder yang harus bisa ditulis PHP. Di container ini sumber masalah nomor satu: volume
+/// milik root, PHP berjalan sebagai www-data, lalu unggahan gagal tanpa pesan yang jelas.
+fn warn_unwritable(p: &Project) {
+    use std::os::unix::ffi::OsStrExt;
+    let dirs = match p.kind {
+        Kind::WordPress => vec![p.root.join("wp-content")],
+        Kind::Laravel => vec![p.dir.join("storage"), p.dir.join("bootstrap/cache")],
+        Kind::Php => vec![],
+    };
+    for d in dirs.iter().filter(|d| d.is_dir()) {
+        let Ok(c) = std::ffi::CString::new(d.as_os_str().as_bytes()) else { continue };
+        if unsafe { libc::access(c.as_ptr(), libc::W_OK) } != 0 {
+            say!(
+                "jamu: peringatan: {} tidak bisa ditulis oleh uid {}; unggahan, cache, atau log situs akan gagal",
+                d.display(),
+                unsafe { libc::geteuid() }
+            );
+        }
     }
 }
 
@@ -418,6 +509,8 @@ fn serve(o: Opts) -> Result<(), String> {
             }
             443
         }
+        (None, None) if o.behind_proxy && port_free(8080) => 8080,
+        (None, None) if o.behind_proxy => return Err(format!("Port 8080 sedang dipakai{}.", port_holder(8080))),
         (None, Some(p)) if port_free(p) => p,
         (None, Some(p)) => return Err(format!("Port {p} sedang dipakai{}.", port_holder(p))),
         (None, None) => {
@@ -429,8 +522,25 @@ fn serve(o: Opts) -> Result<(), String> {
         }
     };
 
-    let state = state_dir(&project.dir);
-    fs::create_dir_all(state.join("caddy")).map_err(|e| format!("tidak bisa membuat {}: {e}", state.display()))?;
+    let mut state = state_dir(&state_base(), &project.dir);
+    if let Err(first) = fs::create_dir_all(state.join("caddy")) {
+        // Container dengan filesystem read-only, atau UID yang tidak punya folder sendiri:
+        // pakai /tmp, dalam folder yang hanya bisa dibuka pengguna ini.
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+        let uid = unsafe { libc::geteuid() };
+        let tmp = PathBuf::from(format!("/tmp/jamuphp-{uid}"));
+        let wanted = state;
+        state = state_dir(&tmp, &project.dir);
+        let made = fs::DirBuilder::new().recursive(true).mode(0o700).create(state.join("caddy"));
+        let mine = fs::metadata(&tmp).map(|m| m.uid() == uid).unwrap_or(false);
+        if made.is_err() || !mine {
+            return Err(format!(
+                "Tidak ada folder yang bisa ditulis untuk konfigurasi: {} ({first}), dan /tmp juga tidak bisa. \
+                 Tunjuk folder yang bisa ditulis lewat variabel XDG_STATE_HOME, atau pasang tmpfs di sana.",
+                wanted.display()
+            ));
+        }
+    }
     // Panjang path soket Unix dibatasi kernel (108 byte).
     let mut sock = state.join("php-fpm.sock");
     if sock.as_os_str().len() > 100 {
@@ -439,7 +549,7 @@ fn serve(o: Opts) -> Result<(), String> {
     let _ = fs::remove_file(&sock);
     let paths = Paths { caddy, fpm, caddyfile: state.join("Caddyfile"), fpm_conf: state.join("php-fpm.conf"), sock };
     let write = |p: &Path, text: String| fs::write(p, text).map_err(|e| format!("tidak bisa menulis {}: {e}", p.display()));
-    write(&paths.fpm_conf, fpm_conf(&paths.sock, o.domain.is_none()))?;
+    write(&paths.fpm_conf, fpm_conf(&paths.sock, o.domain.is_none() && !o.behind_proxy))?;
     write(&paths.caddyfile, caddyfile(&project, &o, port, &state, &paths.sock))?;
 
     let php_version = Command::new(&paths.fpm)
@@ -461,6 +571,7 @@ fn serve(o: Opts) -> Result<(), String> {
         workers()
     );
     say!("jamu: konfigurasi di {}", state.display());
+    warn_unwritable(&project);
 
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
@@ -468,6 +579,7 @@ fn serve(o: Opts) -> Result<(), String> {
 
     let url = match &o.domain {
         Some(d) => format!("https://{d}"),
+        None if o.behind_proxy => format!("port {port}, di belakang proxy"),
         None => format!("http://localhost:{port}"),
     };
     let domain_mode = o.domain.is_some();
@@ -488,10 +600,30 @@ fn serve(o: Opts) -> Result<(), String> {
     })
 }
 
+/// Untuk HEALTHCHECK container: keluar 0 hanya bila Caddy dan php-fpm sama-sama menjawab.
+fn health(args: &[String]) -> Result<(), String> {
+    let port: u16 = match args {
+        [] => 8080,
+        [flag, n] if flag == "--port" => n.parse().map_err(|_| "--port harus angka 1-65535")?,
+        _ => return Err(USAGE.into()),
+    };
+    let fail = |e: std::io::Error| format!("port {port} tidak menjawab: {e}");
+    let mut conn = TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_secs(2)).map_err(fail)?;
+    conn.set_read_timeout(Some(Duration::from_secs(2))).map_err(fail)?;
+    std::io::Write::write_all(&mut conn, format!("GET {PING_PATH} HTTP/1.0\r\nHost: localhost\r\n\r\n").as_bytes()).map_err(fail)?;
+    let mut reply = String::new();
+    conn.read_to_string(&mut reply).map_err(fail)?;
+    if reply.split_whitespace().nth(1) == Some("200") && reply.trim_end().ends_with("pong") {
+        return Ok(());
+    }
+    Err(format!("php-fpm tidak menjawab ping: {}", reply.lines().next().unwrap_or("jawaban kosong")))
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("serve") => parse_opts(&args[1..]).and_then(serve),
+        Some("health") => health(&args[1..]),
         Some("detect") => parse_opts(&args[1..]).map(|o| {
             let p = detect(&o.dir);
             println!("jenis: {}", kind_name(p.kind));
@@ -569,7 +701,7 @@ mod tests {
     #[test]
     fn caddyfile_dev_hanya_di_loopback_dan_menolak_dotfile() {
         let dir = project(&["wp-load.php", "index.php"]);
-        let o = Opts { dir: dir.clone(), port: None, domain: None, email: None, acme_ca: None, acme_ca_root: None };
+        let o = Opts { dir: dir.clone(), port: None, domain: None, email: None, acme_ca: None, acme_ca_root: None, behind_proxy: false };
         let text = caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), Path::new("/s/php-fpm.sock"));
         assert!(text.contains("bind 127.0.0.1"));
         assert!(text.contains("auto_https off"));
@@ -580,10 +712,21 @@ mod tests {
     #[test]
     fn caddyfile_domain_tidak_mematikan_https() {
         let dir = project(&["index.php"]);
-        let o = Opts { dir: dir.clone(), port: None, domain: Some("situs.test".into()), email: None, acme_ca: None, acme_ca_root: None };
+        let o = Opts { dir: dir.clone(), port: None, domain: Some("situs.test".into()), email: None, acme_ca: None, acme_ca_root: None, behind_proxy: false };
         let text = caddyfile(&detect(&dir), &o, 443, Path::new("/s"), Path::new("/s/php-fpm.sock"));
         assert!(text.contains("situs.test {"));
         assert!(!text.contains("auto_https off"));
         assert!(!text.contains("@uploads_php"));
+    }
+
+    #[test]
+    fn caddyfile_di_belakang_proxy_terbuka_dan_mengenali_https_terusan() {
+        let dir = project(&["index.php"]);
+        let o = Opts { dir: dir.clone(), port: None, domain: None, email: None, acme_ca: None, acme_ca_root: None, behind_proxy: true };
+        let text = caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), Path::new("/s/php-fpm.sock"));
+        assert!(!text.contains("bind 127.0.0.1"));
+        assert!(text.contains("auto_https off"));
+        assert!(text.contains("trusted_proxies static private_ranges"));
+        assert!(text.contains("env HTTPS on"));
     }
 }
