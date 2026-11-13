@@ -412,14 +412,19 @@ struct Plan {
 /// untuk permintaan dari loopback, jadi `jamu health` menguji Caddy dan php-fpm sekaligus.
 const PING_PATH: &str = "/-/jamu/ping";
 
+/// Bawaan opcache memeriksa perubahan file paling cepat tiap 2 detik. Di mode dev itu terasa
+/// seperti "sudah disimpan tapi halamannya belum berubah", jadi diperiksa di setiap permintaan.
+const DEV_REVALIDATE: u8 = 0;
+
 fn workers() -> usize {
     // Dua kali jumlah core, minimal 4 supaya permintaan WordPress ke dirinya sendiri tidak macet.
     (thread::available_parallelism().map(|n| n.get()).unwrap_or(2) * 2).max(4)
 }
 
-/// Pekerja php-cgi selalu hidup semua (tidak ada ondemand), jadi jumlahnya dibatasi.
+/// Pekerja php-cgi selalu hidup semua (tidak ada ondemand) dan masing-masing memakai
+/// sekitar 27 MB, jadi jumlahnya mengikuti jumlah core dengan batas 4 sampai 8.
 fn cgi_workers() -> usize {
-    workers().min(8)
+    thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(4, 8)
 }
 
 fn fpm_conf(sock: &Path, dev: bool) -> String {
@@ -436,6 +441,9 @@ fn fpm_conf(sock: &Path, dev: bool) -> String {
     s += "php_admin_value[upload_max_filesize] = 128M\n";
     s += "php_admin_value[post_max_size] = 128M\n";
     s += &format!("php_admin_flag[display_errors] = {}\n", if dev { "on" } else { "off" });
+    if dev {
+        s += &format!("php_admin_value[opcache.revalidate_freq] = {DEV_REVALIDATE}\n");
+    }
     s
 }
 
@@ -472,6 +480,9 @@ fn windows_ini(php_dir: &Path) -> String {
 fn cgi_ini(bin: &Path, dev: bool) -> String {
     let mut s = String::from("memory_limit = 256M\nupload_max_filesize = 128M\npost_max_size = 128M\n");
     s += &format!("display_errors = {}\nlog_errors = On\n", if dev { "On" } else { "Off" });
+    if dev {
+        s += &format!("opcache.revalidate_freq = {DEV_REVALIDATE}\n");
+    }
     if cfg!(windows) {
         s += &windows_ini(bin.parent().unwrap_or(Path::new(".")));
     }
@@ -529,7 +540,7 @@ fn caddyfile(p: &Project, o: &Opts, port: u16, state: &Path, php: &Php) -> Strin
     s += "\t@hidden {\n\t\tpath_regexp (^|/)\\.\n\t\tnot path /.well-known/*\n\t}\n\trespond @hidden 404\n";
     if p.kind == Kind::WordPress {
         // Windows mengabaikan titik dan spasi di ujung nama file, jadi `x.php.` adalah `x.php`.
-        // Spasi ditulis \\x20 karena spasi biasa memotong token di Caddyfile.
+        // Spasi ditulis \x20 karena spasi biasa memotong token di Caddyfile.
         s += "\t@uploads_php path_regexp (?i)^/wp-content/uploads/.*\\.php[.\\x20]*(/|$)\n\trespond @uploads_php 403\n";
     }
     let upstream = match php {

@@ -15,6 +15,8 @@ import threading
 import time
 import urllib.request
 
+# Konsol Windows bawaannya cp1252; log bisa memuat karakter di luar itu.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 PORT = 8112
 jamu = sys.argv[1]
 site = pathlib.Path(tempfile.mkdtemp()) / "situs"

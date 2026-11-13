@@ -143,6 +143,12 @@ EOF
   ttfb=${t% *}; total=${t#* }
   cek "stream: ttfb < 1 s" "$(awk -v a="$ttfb" 'BEGIN{print (a<1.0)?"yes":"no"}')" yes "ttfb=${ttfb}s"
   cek "stream: total > 1.5 s" "$(awk -v a="$total" 'BEGIN{print (a>1.5)?"yes":"no"}')" yes "total=${total}s"
+  # perubahan kode harus langsung terlihat, tanpa menunggu opcache
+  printf '%s\n' '<?php echo "versi satu";' > "$htd/ubah.php"
+  cek "ubah.php versi satu" "$(cu "$B/ubah.php")" "versi satu"
+  sleep 1.1
+  printf '%s\n' '<?php echo "versi dua!";' > "$htd/ubah.php"
+  cek "ubah.php langsung versi dua" "$(cu "$B/ubah.php")" "versi dua!"
   # 8. konkurensi: 8 permintaan paralel
   local pids="" i ok=0
   for i in 1 2 3 4 5 6 7 8; do

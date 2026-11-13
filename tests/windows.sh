@@ -81,7 +81,7 @@ aman() { # URL: isi jawaban tidak boleh memuat sumber atau rahasia, dan PHP di u
   case "$isi" in
     *RAHASIA*) echo "GAGAL  $1 ($kode): isi bocor: $(head -c 80 "$work/isi.txt")"; gagal=$((gagal+1));;
     *DIEKSEKUSI*) echo "GAGAL  $1 ($kode): PHP di folder unggahan dijalankan"; gagal=$((gagal+1));;
-    *) echo "ok     $1 ($kode)"; lulus=$((lulus+1));;
+    *) echo "ok     $1 ($kode: $(head -c 24 "$work/isi.txt" | tr -d '\r\n'))"; lulus=$((lulus+1));;
   esac
 }
 for u in /INDEX.PHP /index.pHp /index.php. /index.php.. /index.php%20 '/index.php::$DATA' '/index.php::$data' \
@@ -116,6 +116,7 @@ cek "6000 permintaan semuanya 200" "$(awk '$2==200{print $1}' "$work/kode.txt")"
 pid=$(sort -u "$site/pid.log" | wc -l | tr -d ' ')
 catat "PID pekerja yang berbeda: $pid"
 cek "pekerja didaur ulang (lebih dari 8 PID)" "$([ "$pid" -gt 8 ] && echo ya || echo tidak)" ya
+catat "proses php-cgi.exe sesudah daur ulang: $(jumlah php-cgi.exe)"
 cek "induk php-cgi tidak pernah mati" "$(grep -c 'php-cgi berhenti' "$log")" 0
 cek "tidak ada galat opcache atau fatal di log" "$(grep -c -i 'reattach\|fatal' "$log")" 0
 catat "sesudah beban: php-cgi.exe: $(memori php-cgi.exe); caddy.exe: $(memori caddy.exe)"
