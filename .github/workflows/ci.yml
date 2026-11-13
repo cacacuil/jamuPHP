@@ -30,3 +30,97 @@ jobs:
           echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           docker tag jamuphp:8.4 "$target"
           docker push "$target"
+
+  # Spike S2: jamu + Caddy + php-cgi dari zip resmi PHP, di Windows asli.
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      PHP_VERSION: "8.4"
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Rakit jamu, Caddy, dan PHP dalam satu folder
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist/php unduh
+          cp target/release/jamu.exe dist/
+          gh release download --repo caddyserver/caddy --pattern '*_windows_amd64.zip' --dir unduh
+          unzip -q -o unduh/caddy_*_windows_amd64.zip caddy.exe -d dist
+          zip=php-$PHP_VERSION-nts-Win32-vs17-x64-latest.zip
+          curl -fsSL -o unduh/php.zip "https://downloads.php.net/~windows/releases/latest/$zip" \
+            || curl -fsSL -o unduh/php.zip "https://windows.php.net/downloads/releases/latest/$zip"
+          unzip -q unduh/php.zip -d dist/php
+          dist/caddy.exe version
+          dist/php/php-cgi.exe -v
+          ls dist/php | head -40
+      - name: Siapkan Laravel dan WordPress
+        run: |
+          root=$(cygpath -m "$PWD")
+          mkdir -p sites
+          # php.ini ini hanya untuk composer dan artisan di langkah ini. jamu tidak memakainya:
+          # ia menulis php.ini sendiri dan menunjuknya dengan -c.
+          mkdir -p unduh/ini
+          printf 'extension_dir = "%s/dist/php/ext"\n' "$root" > unduh/ini/php.ini
+          for e in curl fileinfo mbstring openssl pdo_sqlite sqlite3 zip; do echo "extension = $e" >> unduh/ini/php.ini; done
+          export PHPRC="$root/unduh/ini" PATH="$PWD/dist/php:$PATH"
+          curl -fsSL -o unduh/composer.phar https://getcomposer.org/download/latest-stable/composer.phar
+          php unduh/composer.phar create-project laravel/laravel sites/laravel --no-interaction --prefer-dist --quiet
+          cat >> sites/laravel/routes/web.php <<'EOF'
+          Route::get('/uji-db', fn () => ['pengguna' => \Illuminate\Support\Facades\DB::table('users')->count()]);
+          Route::get('/uji-sesi', function () { session(['n' => session('n', 0) + 1]); return ['n' => session('n')]; });
+          EOF
+          (cd sites/laravel && php artisan --version && php artisan migrate --force)
+
+          curl -fsSL -o unduh/wp.zip https://wordpress.org/latest.zip
+          unzip -q unduh/wp.zip -d sites
+          mv sites/wordpress sites/wp
+          curl -fsSL -o unduh/sqlite.zip https://downloads.wordpress.org/plugin/sqlite-database-integration.zip
+          unzip -q unduh/sqlite.zip -d sites/wp/wp-content/plugins
+          cp sites/wp/wp-content/plugins/sqlite-database-integration/db.copy sites/wp/wp-content/db.php
+          cat > sites/wp/wp-config.php <<'EOF'
+          <?php
+          define( 'DB_NAME', 'wp' );
+          define( 'DB_USER', 'wp' );
+          define( 'DB_PASSWORD', 'wp' );
+          define( 'DB_HOST', 'localhost' );
+          define( 'DB_CHARSET', 'utf8mb4' );
+          define( 'DB_COLLATE', '' );
+          define( 'AUTH_KEY', 'uji-1' );
+          define( 'SECURE_AUTH_KEY', 'uji-2' );
+          define( 'LOGGED_IN_KEY', 'uji-3' );
+          define( 'NONCE_KEY', 'uji-4' );
+          define( 'AUTH_SALT', 'uji-5' );
+          define( 'SECURE_AUTH_SALT', 'uji-6' );
+          define( 'LOGGED_IN_SALT', 'uji-7' );
+          define( 'NONCE_SALT', 'uji-8' );
+          $table_prefix = 'wp_';
+          define( 'WP_DEBUG', false );
+          define( 'DISABLE_WP_CRON', true );
+          define( 'WP_HTTP_BLOCK_EXTERNAL', true );
+          define( 'AUTOMATIC_UPDATER_DISABLED', true );
+          if ( ! defined( 'ABSPATH' ) ) {
+          	define( 'ABSPATH', __DIR__ . '/' );
+          }
+          require_once ABSPATH . 'wp-settings.php';
+          EOF
+      - name: Uji end-to-end (sama dengan Linux)
+        run: |
+          root=$(cygpath -m "$PWD")
+          JAMU=dist/jamu.exe LARAVEL_DIR="$root/sites/laravel" WP_DIR="$root/sites/wp" bash tests/e2e.sh
+      - name: Uji khusus Windows
+        if: always()
+        run: JAMU=dist/jamu.exe PHP_DIR=dist/php bash tests/windows.sh
+      - name: Berhenti dengan rapi (Ctrl-Break)
+        if: always()
+        run: python tests/windows_stop.py dist/jamu.exe
+      - name: Simpan rakitan untuk dicoba di Windows
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jamuphp-windows-spike
+          path: dist
