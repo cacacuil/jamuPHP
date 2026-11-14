@@ -44,7 +44,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q php8.3-fpm php8.3-cli php8.3-sqlite3 php8.3-mbstring php8.3-xml php8.3-curl php8.3-zip
+          sudo apt-get install -y -q php8.3-fpm php8.3-cli php8.3-sqlite3 php8.3-mbstring php8.3-xml php8.3-curl php8.3-zip msmtp
           mkdir -p unduh bin
           gh release download --repo caddyserver/caddy --pattern '*_linux_amd64.tar.gz' --dir unduh
           tar -xzf unduh/caddy_*_linux_amd64.tar.gz -C bin caddy
@@ -90,17 +90,6 @@ jobs:
           ls dist/php | head -40
       - name: Siapkan Laravel dan WordPress
         run: JAMU=dist/jamu.exe bash tests/sites.sh sites
-      # Sementara: mencari sebab runner Windows sesekali hilang di tengah uji end-to-end.
-      - name: Diagnosa pohon proses
-        shell: pwsh
-        run: |
-          $all = Get-CimInstance Win32_Process
-          $nama = @{}
-          $all | ForEach-Object { $nama[[int]$_.ProcessId] = $_.Name }
-          $all | Sort-Object ProcessId | ForEach-Object {
-            $induk = if ($nama.ContainsKey([int]$_.ParentProcessId)) { $nama[[int]$_.ParentProcessId] } else { 'MATI' }
-            '{0,6} {1,6} {2,-32} induk={3}' -f $_.ProcessId, $_.ParentProcessId, $_.Name, $induk
-          }
       - name: Uji end-to-end (sama dengan Linux)
         run: |
           root=$(cygpath -m "$PWD")

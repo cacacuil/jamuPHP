@@ -727,8 +727,111 @@ grup_check() {
   akhir_grup "$log"
 }
 
+# Mode teruskan email: mail() diserahkan ke relay SMTP lewat `jamu sendmail` dan msmtp.
+grup_mail() {
+  echo "== email =="
+  if [ "$windows" = 1 ] || ! command -v msmtp >/dev/null 2>&1; then
+    echo "lewati: mode teruskan email (msmtp tidak ada)"; return
+  fi
+  local s1="$work/surat" s2="$work/surat-batas" log="$work/mail.log" kotak="$work/kotak.txt"
+  local B=http://127.0.0.1:8141 smtp=8142 SP r n keluaran rc
+  mkdir -p "$s1" "$s2"
+  cat > "$s1/kirim.php" <<'EOF'
+<?php
+$kepala = isset($_GET['dari']) ? "From: Toko <{$_GET['dari']}>" : '';
+var_dump(mail('tujuan@contoh.test', 'Uji jamu', "baris satu\n.\nbaris tiga", $kepala, $_GET['param'] ?? ''));
+EOF
+  cp "$s1/kirim.php" "$s2/kirim.php"
+  printf '%s\n' '<?php echo ini_get("sendmail_path");' > "$s1/jalur.php"
+  : > "$kotak"
+  python3 "$here/smtp_palsu.py" "$smtp" "$kotak" & SP=$!
+  for _ in $(seq 1 20); do (exec 3<>"/dev/tcp/127.0.0.1/$smtp") 2>/dev/null && break; sleep 0.25; done
+  export JAMU_SMTP_HOST=127.0.0.1 JAMU_SMTP_PORT=$smtp JAMU_SMTP_TLS=off
+
+  # Pengaturan yang salah ditolak saat menyalakan, bukan saat email pertama gagal.
+  JAMU_SMTP_PORT=abc gagal_start "port relay bukan angka" JAMU_SMTP_PORT serve "$s1" --port 8141
+  JAMU_SMTP_TLS=mungkin gagal_start "nilai TLS tidak dikenal" JAMU_SMTP_TLS serve "$s1" --port 8141
+  JAMU_SMTP_USER=siti gagal_start "pengguna tanpa sandi" JAMU_SMTP_PASS serve "$s1" --port 8141
+  JAMU_SMTP_USER=siti JAMU_SMTP_PASS=rahasia gagal_start "sandi tanpa TLS" 'tanpa enkripsi' serve "$s1" --port 8141
+  JAMU_MAIL_FROM='bukan alamat' gagal_start "pengirim bawaan bukan alamat" JAMU_MAIL_FROM serve "$s1" --port 8141
+  JAMU_MAIL_LIMIT=banyak gagal_start "batas bukan angka" JAMU_MAIL_LIMIT serve "$s1" --port 8141
+  JAMU_MSMTP="$work/tidak-ada" gagal_start "msmtp tidak terpasang" msmtp serve "$s1" --port 8141
+  gagal_start "sendmail diketik sendiri" 'dipanggil oleh PHP' sendmail -t
+
+  # Tanpa relay, PHP tidak disentuh.
+  JAMU_SMTP_HOST='' start_jamu "$s1" 8141 "$log" || { cek "start tanpa relay" gagal ok; kill $SP; akhir_grup "$log"; return; }
+  cek "tanpa relay: sendmail_path bawaan PHP" "$(has "$(cu $B/jalur.php)" 'jamu')" no
+  stop_jamu
+
+  start_jamu "$s1" 8141 "$log" || { cek "start dengan relay" gagal ok; kill $SP; akhir_grup "$log"; return; }
+  cek "relay disebut saat menyala" "$(has "$(cat "$log")" "mail() diteruskan ke 127.0.0.1:$smtp")" yes
+  cek "mail() berhasil" "$(cu "$B/kirim.php?dari=toko@situs.test")" 'bool(true)'
+  cek "pengirim amplop dari header From" "$(grep -c '^MAIL FROM:<toko@situs.test>' "$kotak")" 1 "$(cat "$kotak")"
+  cek "penerima sampai ke relay" "$(grep -c '^RCPT TO:<tujuan@contoh.test>' "$kotak")" 1
+  cek "judul sampai ke relay" "$(grep -c '^| Subject: Uji jamu' "$kotak")" 1
+  # Baris berisi satu titik tidak boleh memotong email.
+  cek "isi sesudah baris titik ikut terkirim" "$(grep -c '^| baris tiga' "$kotak")" 1 "$(cat "$kotak")"
+  sleep 0.3
+  cek "pengiriman tercatat di log" "$(grep -c 'email ke tujuan@contoh.test diteruskan' "$log")" 1 "$(tail -5 "$log")"
+
+  cek "mail() dengan -f" "$(cu "$B/kirim.php?dari=toko@situs.test&param=-fpantul@situs.test")" 'bool(true)'
+  cek "-f menjadi pengirim amplop" "$(grep -c '^MAIL FROM:<pantul@situs.test>' "$kotak")" 1
+  # Parameter kelima mail() adalah celah lama: opsi selain -f tidak boleh sampai ke msmtp.
+  r=$(cu -G "$B/kirim.php" --data-urlencode "dari=toko@situs.test" \
+    --data-urlencode "param=-fa@situs.test -X$work/bocor.log -C$work/bocor.conf --host=10.0.0.1")
+  cek "parameter liar: email tetap terkirim" "$r" 'bool(true)'
+  cek "parameter liar: -f dipakai" "$(grep -c '^MAIL FROM:<a@situs.test>' "$kotak")" 1
+  cek "parameter liar: tidak ada berkas tertulis" "$(ya test -e "$work/bocor.log")" no
+  r=$(cu -G "$B/kirim.php" --data-urlencode "dari=toko@situs.test" --data-urlencode "param=-f-oQ/tmp")
+  cek "pengirim -f yang aneh diabaikan" "$r" 'bool(true)'
+  cek "pengirim -f yang aneh: memakai header From" "$(grep -c '^MAIL FROM:<toko@situs.test>' "$kotak")" 2
+
+  n=$(grep -c '^SELESAI' "$kotak")
+  cek "tanpa pengirim: mail() gagal" "$(cu "$B/kirim.php")" 'bool(false)'
+  cek "tanpa pengirim: tidak ada yang dikirim" "$(grep -c '^SELESAI' "$kotak")" "$n"
+  sleep 0.3
+  cek "tanpa pengirim: sebabnya di log" "$(has "$(cat "$log")" 'tidak punya pengirim')" yes "$(tail -5 "$log")"
+  stop_jamu
+
+  # PHP di baris perintah (pekerja, penjadwal, jamu php) memakai jalur yang sama.
+  r=$(cd "$s1" && "$JAMU" php -r 'var_dump(mail("cli@contoh.test", "dari cli", "isi", "From: cli@situs.test"));' 2>&1)
+  cek "jamu php: mail() berhasil" "$(has "$r" 'bool(true)')" yes "$r"
+  cek "jamu php: sampai ke relay" "$(grep -c '^RCPT TO:<cli@contoh.test>' "$kotak")" 1
+  r=$(cd "$s1" && JAMU_SMTP_PORT=8143 "$JAMU" php -r 'var_dump(mail("cli@contoh.test", "dari cli", "isi", "From: cli@situs.test"));' 2>&1)
+  cek "relay mati: mail() gagal" "$(has "$r" 'bool(false)')" yes "$r"
+  cek "relay mati: sebabnya disebut" "$(has "$r" 'email ke cli@contoh.test gagal: cannot connect')" yes "$r"
+
+  # jamu check ikut memeriksa relay.
+  periksa "$s1"
+  cek "check: konfigurasi PHP dengan relay diterima" "$rc" 0 "$keluaran"
+  cek "check: relay menjawab" "$(has "$keluaran" "relay SMTP 127.0.0.1:$smtp menjawab")" yes "$keluaran"
+  JAMU_SMTP_PORT=8143 periksa "$s1"
+  cek "check: relay mati adalah masalah" "$rc" 1 "$keluaran"
+  cek "check: relay mati disebut" "$(has "$keluaran" 'MASALAH  relay SMTP 127.0.0.1:8143 tidak bisa dihubungi')" yes "$keluaran"
+  JAMU_SMTP_PORT=abc periksa "$s1"
+  cek "check: pengaturan relay yang salah adalah masalah" "$(has "$keluaran" 'MASALAH  JAMU_SMTP_PORT')" yes "$keluaran"
+
+  # Pengirim bawaan dan batas laju per jam.
+  JAMU_MAIL_FROM=bawaan@situs.test JAMU_MAIL_LIMIT=2 start_jamu "$s2" 8141 "$log" \
+    || { cek "start dengan batas" gagal ok; kill $SP; akhir_grup "$log"; return; }
+  cek "pengirim bawaan: mail() berhasil" "$(cu "$B/kirim.php")" 'bool(true)'
+  cek "pengirim bawaan dipakai" "$(grep -c '^MAIL FROM:<bawaan@situs.test>' "$kotak")" 1 "$(cat "$kotak")"
+  cek "pengirim bawaan menjadi header From" "$(grep -c '^| From: bawaan@situs.test' "$kotak")" 1
+  cek "email kedua masih boleh" "$(cu "$B/kirim.php?dari=toko@situs.test")" 'bool(true)'
+  n=$(grep -c '^SELESAI' "$kotak")
+  cek "email ketiga ditolak" "$(cu "$B/kirim.php?dari=toko@situs.test")" 'bool(false)'
+  cek "email keempat ditolak" "$(cu "$B/kirim.php?dari=toko@situs.test")" 'bool(false)'
+  cek "yang ditolak tidak sampai ke relay" "$(grep -c '^SELESAI' "$kotak")" "$n"
+  sleep 0.3
+  cek "batas tercapai: satu baris di log, bukan satu per email" "$(grep -c 'batas 2 email per jam' "$log")" 1 "$(tail -5 "$log")"
+  stop_jamu
+  kill $SP 2>/dev/null; wait $SP 2>/dev/null
+  unset JAMU_SMTP_HOST JAMU_SMTP_PORT JAMU_SMTP_TLS
+  akhir_grup "$log"
+}
+
 # GRUP="check toml" menjalankan sebagian saja; tanpa itu semuanya.
-for g in ${GRUP:-php check proxy toml wp_aturan laravel wp}; do "grup_$g"; done
+for g in ${GRUP:-php check proxy toml mail wp_aturan laravel wp}; do "grup_$g"; done
 
 echo "$lulus lulus, $gagal gagal"
 # Folder kerja hanya berguna untuk memeriksa kegagalan; bila semua lulus, dibuang.

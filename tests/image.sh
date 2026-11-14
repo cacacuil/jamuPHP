@@ -37,6 +37,13 @@ docker run --rm --entrypoint sh "$image" -c 'mkdir /tmp/p && cd /tmp/p \
   && jamu composer dump-autoload >/dev/null 2>&1 && test -f vendor/autoload.php' \
   || fail "jamu composer tidak bisa menulis vendor/ sebagai www-data"
 
+# Mode teruskan email: sendmail_path yang ditulis jamu harus sampai ke msmtp di dalam image.
+# Relay sengaja tidak ada, jadi yang diharapkan adalah kegagalan dengan alasan dari msmtp.
+surat=$(docker run --rm -w /tmp --entrypoint jamu \
+  -e JAMU_SMTP_HOST=127.0.0.1 -e JAMU_SMTP_PORT=9 -e JAMU_SMTP_TLS=off "$image" \
+  php -r 'var_dump(mail("a@contoh.test", "uji", "isi", "From: b@contoh.test"));' 2>&1 || true)
+[[ $surat == *"gagal: cannot connect"* && $surat == *"bool(false)"* ]] || fail "mode teruskan email: $surat"
+
 body=$(get "$url/")
 [[ $body == https=tidak* ]] || fail "halaman utama: $body"
 [[ $body == *" uid=0 "* ]] && fail "PHP berjalan sebagai root"

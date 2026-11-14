@@ -8,6 +8,7 @@ use std::process::Command;
 use std::{env, fs};
 
 use crate::config::cli_ini;
+use crate::mail;
 use crate::os;
 use crate::paths::{find_bin, find_file, open_state};
 use crate::settings::{self, Settings};
@@ -58,9 +59,14 @@ pub fn php_cli(dir: &Path, settings: &Settings) -> Result<PhpCli, String> {
         .map_err(|e| format!("PATH tidak bisa disusun: {e}"))?;
         vars.push(("PATH".into(), path));
     }
-    let ini = cli_ini(&bin, &settings.ini());
-    if !ini.is_empty() {
-        let ini_dir = open_state(dir)?.join("cli");
+    let mut user = settings.ini();
+    let mail = mail::wanted(&user)?;
+    // Folder state baru dibuka bila memang ada yang perlu ditulis.
+    if mail || !user.is_empty() || cfg!(windows) {
+        let state = open_state(dir)?;
+        mail::add_sendmail(&mut user, &state)?;
+        let ini = cli_ini(&bin, &user);
+        let ini_dir = state.join("cli");
         fs::create_dir_all(&ini_dir)
             .map_err(|e| format!("tidak bisa membuat {}: {e}", ini_dir.display()))?;
         // Zip resmi PHP untuk Windows tidak membawa php.ini, jadi file ini menjadi php.ini-nya.

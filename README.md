@@ -43,7 +43,8 @@ jamu check /path/ke/project --behind-proxy
 Yang diperiksa: `jamu.toml`, versi PHP, konfigurasi Caddy dan php-fpm yang akan dipakai,
 ekstensi yang diminta paket Composer, folder yang harus bisa ditulis, `APP_KEY` dan
 `APP_DEBUG` Laravel, rekaman DNS untuk `--domain`, dan folder yang ditutup lewat
-`.htaccess` (`jamu` tidak membaca `.htaccess`, jadi folder seperti itu terbuka).
+`.htaccess` (`jamu` tidak membaca `.htaccess`, jadi folder seperti itu terbuka), dan relay
+SMTP bila mode teruskan email dipakai.
 
 PHP dan Composer untuk project ini, yaitu PHP yang sama dengan yang melayani situsnya:
 
@@ -90,6 +91,29 @@ Tidak ada yang perlu diatur. Yang sudah diurus `jamu`:
   plugin itu tidak didukung; biarkan mati (bawaannya memang mati).
 - `wp-cron.php` dijalankan tiap menit, jadi tulisan terjadwal terbit tepat waktu walau
   situs sedang sepi.
+
+## Email
+
+`jamu` tidak menjalankan server email. Bila variabel `JAMU_SMTP_HOST` diisi, `mail()` di
+PHP diteruskan ke penyedia SMTP itu (lewat `msmtp`, yang sudah ada di image container):
+
+```bash
+JAMU_SMTP_HOST=smtp.penyedia.com JAMU_SMTP_USER=akun JAMU_SMTP_PASS=sandi jamu serve /path/ke/project --behind-proxy
+```
+
+| Variabel | Bawaan | Arti |
+|---|---|---|
+| `JAMU_SMTP_HOST` | kosong | Nama host relay. Kosong berarti `mail()` tidak disentuh. |
+| `JAMU_SMTP_PORT` | `587` | Port 465 langsung TLS; port lain memakai STARTTLS. |
+| `JAMU_SMTP_USER`, `JAMU_SMTP_PASS` | kosong | Akun di relay. Sandi tidak ditulis ke berkas. |
+| `JAMU_SMTP_TLS` | `on` | `off` hanya untuk relay di jaringan sendiri atau penangkap email saat development; tidak bisa dipakai bersama akun. |
+| `JAMU_MAIL_FROM` | kosong | Pengirim untuk email yang skripnya tidak menyebut pengirim. |
+| `JAMU_MAIL_LIMIT` | `200` | Email per jam untuk situs ini; `0` berarti tanpa batas. |
+
+Tiap email dicatat satu baris di log, terkirim maupun gagal beserta alasan dari relay.
+Email yang melewati batas ditolak (`mail()` mengembalikan `false`), supaya satu situs yang
+dibobol tidak merusak nama baik relay. `jamu check` ikut menanyai relay. Laravel tidak
+butuh ini: ia berbicara SMTP sendiri lewat `MAIL_*` di `.env`. Belum ada di Windows.
 
 ## Log
 

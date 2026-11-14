@@ -14,6 +14,7 @@ use crate::config::{
     PING_PATH, Php, Plan, Task, caddyfile, cgi_ini, cgi_workers, fpm_conf, workers,
 };
 use crate::detect::{Kind, Project, kind_name};
+use crate::mail;
 use crate::paths::{find_bin, fnv1a, open_state};
 use crate::settings;
 use crate::supervise::{plain_log, supervise};
@@ -99,11 +100,11 @@ pub fn write_php(
     state: &Path,
     (cgi, bin): (bool, PathBuf),
     dev: bool,
-    settings: &settings::Settings,
+    user: &[(String, String)],
 ) -> Result<Php, String> {
     if cgi {
         let ini = dir.join("php.ini");
-        write(&ini, cgi_ini(&bin, dev, &settings.ini()))?;
+        write(&ini, cgi_ini(&bin, dev, user))?;
         return Ok(Php::Cgi {
             bin,
             ini,
@@ -119,7 +120,7 @@ pub fn write_php(
         ));
     }
     let conf = dir.join("php-fpm.conf");
-    write(&conf, fpm_conf(&sock, dev, &settings.ini()))?;
+    write(&conf, fpm_conf(&sock, dev, user))?;
     Ok(Php::Fpm { bin, conf, sock })
 }
 
@@ -167,7 +168,9 @@ pub fn serve(o: Opts) -> Result<(), String> {
     };
 
     let state = open_state(&project.dir)?;
-    let php = write_php(&state, &state, found_php, dev, &settings)?;
+    let mut ini = settings.ini();
+    mail::add_sendmail(&mut ini, &state)?;
+    let php = write_php(&state, &state, found_php, dev, &ini)?;
     if let Php::Fpm { sock, .. } = &php {
         let _ = fs::remove_file(sock);
     }
@@ -272,6 +275,9 @@ pub fn serve(o: Opts) -> Result<(), String> {
     }
     if let Some(task) = &plan.schedule {
         say!("jamu: penjadwal aktif ({} tiap menit)", task.run);
+    }
+    if let Some(relay) = mail::relay()? {
+        say!("jamu: mail() diteruskan ke {}:{}", relay.host, relay.port);
     }
     for (d, who) in unwritable(&project) {
         say!(

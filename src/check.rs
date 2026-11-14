@@ -12,6 +12,7 @@ use std::{env, fs};
 use crate::cli::{check_version, php_cli, php_version};
 use crate::config::{Php, caddyfile};
 use crate::detect::{Kind, kind_name};
+use crate::mail;
 use crate::paths::{find_bin, find_file, open_state};
 use crate::serve::{find_php, unwritable, write, write_php};
 use crate::{Opts, settings};
@@ -147,6 +148,14 @@ pub fn check(o: Opts) -> Result<(), String> {
     let state = open_state(&project.dir)?;
     let dir = state.join("check");
     fs::create_dir_all(&dir).map_err(|e| format!("tidak bisa membuat {}: {e}", dir.display()))?;
+    let mut ini = settings.ini();
+    let mail_ok = match mail::add_sendmail(&mut ini, &state) {
+        Ok(()) => true,
+        Err(e) => {
+            r.problem(&e);
+            false
+        }
+    };
     let php = match find_php() {
         Ok(found) => {
             let version = php_version(&found.1);
@@ -154,7 +163,7 @@ pub fn check(o: Opts) -> Result<(), String> {
                 Ok(()) => r.ok(&format!("PHP {version}")),
                 Err(e) => r.problem(&e),
             }
-            Some(write_php(&dir, &state, found, dev, &settings)?)
+            Some(write_php(&dir, &state, found, dev, &ini)?)
         }
         Err(e) => {
             r.problem(&e);
@@ -212,6 +221,22 @@ pub fn check(o: Opts) -> Result<(), String> {
                 "{d} belum punya rekaman DNS (A atau AAAA): sertifikat tidak akan terbit"
             )),
         }
+    }
+
+    // Email: relay yang tidak menjawab baru ketahuan saat email pertama gagal, kecuali ditanya
+    // sekarang. WordPress memakai mail() untuk reset sandi dan pemberitahuan pesanan.
+    match mail::relay() {
+        Ok(Some(relay)) if mail_ok && mail::wanted(&settings.ini()) == Ok(true) => {
+            let at = format!("relay SMTP {}:{}", relay.host, relay.port);
+            match relay.probe() {
+                Ok(()) => r.ok(&format!("{at} menjawab")),
+                Err(e) => r.problem(&format!("{at} tidak bisa dihubungi: {e}")),
+            }
+        }
+        Ok(None) if !dev && project.kind == Kind::WordPress => r.note(
+            "mail() tidak mengirim email: isi JAMU_SMTP_HOST untuk meneruskannya ke relay SMTP, atau pakai plugin SMTP",
+        ),
+        _ => {}
     }
 
     // Ekstensi dan versi PHP yang diminta paket: Composer sudah tahu cara memeriksanya.

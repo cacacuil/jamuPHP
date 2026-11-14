@@ -21,6 +21,7 @@ mod check;
 mod cli;
 mod config;
 mod detect;
+mod mail;
 #[cfg_attr(unix, path = "os_unix.rs")]
 #[cfg_attr(windows, path = "os_windows.rs")]
 mod os;
@@ -140,6 +141,8 @@ fn main() -> ExitCode {
         Some("health") => serve::health(&args[1..]),
         Some("php") => cli::php(&args[1..]),
         Some("composer") => cli::composer(&args[1..]),
+        // Dipanggil PHP lewat `sendmail_path`, bukan diketik.
+        Some("sendmail") => mail::sendmail(&args[1..]),
         Some("detect") => parse_opts(&args[1..])
             .and_then(|o| settings::load(&o.dir))
             .map(|(p, s)| {

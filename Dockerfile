@@ -24,6 +24,10 @@ ARG PHP_EXTENSIONS="bcmath exif gd igbinary imagick intl mysqli pdo_mysql pdo_pg
 COPY --from=mlocati/php-extension-installer /usr/bin/install-php-extensions /usr/local/bin/
 RUN install-php-extensions ${PHP_EXTENSIONS} \
  && cp "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini"
+# msmtp mengantar mail() ke relay SMTP bila JAMU_SMTP_HOST diisi; tidak ada server email di sini.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends msmtp \
+ && rm -rf /var/lib/apt/lists/*
 COPY --from=caddy /usr/bin/caddy /usr/local/bin/caddy
 # Untuk `RUN jamu composer install` di Dockerfile project, tanpa tahap build terpisah.
 COPY --from=composer /usr/bin/composer /usr/local/bin/composer

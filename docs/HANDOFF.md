@@ -1,6 +1,6 @@
 # JamuPHP: handoff v2
 
-Tanggal: 14 November 2026, revisi 11. Menggantikan handoff v1 ("XAMPP berbasis Rust").
+Tanggal: 14 November 2026, revisi 12. Menggantikan handoff v1 ("XAMPP berbasis Rust").
 Nama produk: JamuPHP. Perintahnya `jamu`, file config-nya `jamu.toml`. Repositori:
 https://github.com/cacacuil/jamuphp (lisensi AGPL-3.0).
 
@@ -33,6 +33,10 @@ Perubahan di revisi 11: owner menyetujui aturan berkas cache masuk fase 2. Fase 
 (bagian 20): `jamu.toml`, pekerja, penjadwal Laravel, `jamu php` dan `jamu composer`, serta
 tes daftar wajib bagian 8 yang berjalan sama di Linux dan Windows. Lingkup fase 1 dipotong
 ulang mengikuti keputusan Caddy (bagian 10). Contoh `jamu.toml` di bagian 6 dikoreksi.
+Perubahan di revisi 12: fase 1 digabung ke `main` atas permintaan owner. Fase 2 dikerjakan
+di branch `fase-2` (bagian 21): aturan berkas cache, multisite, wp-cron, log akses,
+`jamu check`, beberapa domain dan kabar sertifikat, serta mode teruskan email. Sebab runner
+Windows di CI sesekali hilang ditemukan dan dicatat di bagian yang sama.
 
 ## 1. Inti dalam satu menit
 
@@ -812,7 +816,7 @@ Rumusan awal fase ini ditulis sebelum keputusan Caddy. Yang berubah:
 | Aturan multisite WordPress di korpus uji | Pindah ke fase 2 | Satu kelompok dengan pekerjaan WordPress production lain: wp-cron dan aturan berkas cache. |
 | Penerus `php` dan `composer` yang memilih versi | Penerus sudah ada; memilih versi menunggu fase 3 | Baru bermakna bila ada lebih dari satu versi PHP terpasang, dan itu pekerjaan "unduh dan ganti versi PHP". Sampai saat itu `php = "8.4"` adalah janji yang diperiksa, bukan pemilih. |
 
-**Fase 2, production (S).** Dua mode: server mandiri dengan SSL sah bawaan Caddy (tambah
+**Fase 2, production (S).** Sedang dikerjakan; keadaannya di bagian 21. Dua mode: server mandiri dengan SSL sah bawaan Caddy (tambah
 domain, pemeriksaan DNS, status sertifikat), dan container di belakang Traefik. Lalu mail
 mode teruskan, wp-cron, aturan multisite WordPress, aturan berkas cache buatan plugin
 (bagian 19), log akses, log JSON, perintah `check`. Healthcheck, kepercayaan proxy, dan
@@ -1439,10 +1443,11 @@ Keempat spike sudah dikerjakan. Yang masih terbuka sebelum fase 1:
    Let's Encrypt dengan domain sungguhan (sisa S3 dan S1).
 3. Owner memutuskan soal aturan berkas cache di atas. Sudah: disetujui, masuk fase 2.
 
-## 20. Fase 1: core headless (sedang berjalan)
+## 20. Fase 1: core headless (sudah di `main`)
 
-Kode spike tidak dibuang; ia dirapikan menjadi dasar fase 1. Dikerjakan di branch `fase-1`.
-`main` belum disentuh, supaya image `:8.4` di GHCR tidak berubah sebelum owner memintanya.
+Kode spike tidak dibuang; ia dirapikan menjadi dasar fase 1. Dikerjakan di branch `fase-1`
+dan digabung ke `main` atas permintaan owner, sehingga image `:8.4` di GHCR sudah berisi
+hasil fase ini.
 
 ### Yang dibuat
 
@@ -1542,11 +1547,145 @@ dalam 3,7 detik.
 - Uji `--domain` dengan domain sungguhan dan deploy di Dokploy dari image GHCR masih sisa
   S1 dan S3, dan tetap perlu dilakukan owner.
 
+## 21. Fase 2: production (sedang berjalan)
+
+Dikerjakan di branch `fase-2`. `main` tidak disentuh: push ke `main` menerbitkan ulang
+image `:8.4`, dan itu keputusan owner.
+
+### Yang dibuat
+
+- **Aturan berkas cache WP Super Cache** (rekomendasi bagian 19). Halaman yang sudah dibuat
+  plugin disajikan Caddy tanpa menyentuh PHP. Syaratnya sama dengan aturan `.htaccess`
+  buatan plugin: hanya GET dan HEAD, tanpa query string, alamat berakhir garis miring,
+  dan pengunjung tidak membawa cookie login, komentar, atau tulisan bersandi. Halaman HTTP
+  dan HTTPS memakai berkas terpisah, mengikuti plugin; di belakang proxy, HTTPS dikenali
+  dari `X-Forwarded-Proto` yang datang dari jaringan privat. Aturan hanya berlaku selama
+  berkas plugin masih ada, diperiksa di setiap permintaan: bila folder plugin dihapus tanpa
+  dinonaktifkan, berkas cache yang tertinggal tidak disajikan selamanya.
+- **Multisite subdirektori.** Dikenali dari `MULTISITE` dan `SUBDOMAIN_INSTALL` di
+  `wp-config.php`; aturan tulis ulangnya (`/toko/wp-admin/...` ke `/wp-admin/...`) dipasang
+  sebelum aturan tolak. Multisite subdomain tidak butuh aturan tambahan.
+- **wp-cron.** Penjadwal yang sama dengan Laravel menjalankan `php wp-cron.php` tiap
+  menit, dan tidak memulai yang baru selama yang lama belum selesai. Menyala dengan
+  sendirinya di `--domain` dan `--behind-proxy`, mati di mode dev.
+- **Log akses.** Satu baris per permintaan:
+  `[akses] <alamat pengunjung> <METODE> <uri> <kode> <lama> ms`. Pemeriksaan kesehatan
+  (`jamu health`) tidak dicatat, supaya log tidak berisi satu baris tiap 10 detik.
+- **`jamu check`.** Opsi yang sama dengan `serve`. Menulis konfigurasi ke subfolder sendiri
+  lalu meminta Caddy dan php-fpm mengujinya, jadi situs yang sedang jalan tidak terganggu.
+  Yang diperiksa: `jamu.toml`, versi PHP, kebutuhan paket Composer
+  (`composer check-platform-reqs`), folder yang harus bisa ditulis, `APP_KEY` dan
+  `APP_DEBUG` Laravel (variabel lingkungan menang atas `.env`; `APP_DEBUG` hanya masalah di
+  mode production), rekaman DNS tiap `--domain`, `.htaccess` yang menutup folder, dan relay
+  SMTP. Keluar dengan kode 1 bila ada masalah, jadi bisa menggagalkan deploy (F1).
+- **Beberapa domain.** `--domain` boleh diulang; semua nama dilayani situs yang sama dan
+  mendapat sertifikat. Nama domain, `--email`, dan `--acme-ca` diperiksa sebelum ditulis ke
+  konfigurasi Caddy, karena di hosting nilainya bisa berasal dari isian pelanggan.
+- **Kabar sertifikat.** Terbit, diperpanjang, gagal, dan kapan dicoba lagi ditulis sebagai
+  baris `jamu: sertifikat ...`. Bila CA menolak, alasannya diterjemahkan (DNS belum benar,
+  server tidak terjangkau, rekaman CAA, batas laju) dan kalimat asli dari CA ikut
+  ditampilkan.
+- **Mode teruskan email.** Bila `JAMU_SMTP_HOST` diisi, `sendmail_path` PHP diarahkan ke
+  `jamu sendmail`, yang menyerahkan email ke `msmtp` untuk diantar ke relay. Berlaku untuk
+  web, pekerja, penjadwal, dan `jamu php`. Tidak ada server email, antrean, atau proses
+  latar yang ditambahkan. Variabelnya enam, tercantum di README.
+
+### Temuan
+
+1. **G1 sudah dijaga Caddy.** Dibaca dari kode certmagic 0.25.6: setelah penerbitan gagal,
+   percobaan berikutnya dilakukan ke endpoint staging CA dulu, dan baru kembali ke
+   endpoint production setelah staging berhasil (berlaku untuk CA bawaan, Let's Encrypt).
+   Domain yang DNS-nya belum benar tidak menghabiskan jatah di CA production. Karena itu pemeriksaan DNS buatan sendiri sebelum
+   meminta sertifikat tidak dibangun; yang dibangun adalah menampilkan penjelasan dari CA.
+2. **Alamat server sendiri tidak bisa diketahui dari dalam** (NAT, container). `check`
+   menampilkan alamat yang ditunjuk DNS untuk dicocokkan orang, dan hanya nama tanpa
+   rekaman sama sekali yang dihitung masalah. Rekaman AAAA lama (G6) ikut terlihat di
+   daftar itu.
+3. **`mail()` dan parameter kelima.** PHP menempelkan parameter kelima `mail()` ke perintah
+   sendmail. Itu jalur serangan lama (opsi `-X` menulis berkas, `-C` membaca konfigurasi).
+   `jamu sendmail` hanya mengambil `-f` dengan alamat yang sah dan membuang sisanya.
+4. **msmtp menolak masuk dengan sandi tanpa TLS.** Karena itu `JAMU_SMTP_TLS=off` bersama
+   `JAMU_SMTP_USER` ditolak saat `serve` dinyalakan, bukan saat email pertama gagal.
+5. **Email tanpa pengirim ditolak msmtp.** `mail($ke, $judul, $isi)` polos tidak membawa
+   header From. Untuk itu ada `JAMU_MAIL_FROM`; tanpa keduanya `mail()` mengembalikan
+   `false` dan sebabnya ditulis di log.
+6. **Runner Windows di CI sesekali hilang di tengah uji** (dua dari sepuluh job): tanpa
+   log, dan batas waktu job tidak berlaku. Sebab yang paling masuk akal: `kill` di Git
+   Bash untuk program Windows asli mematikan juga semua "keturunan" yang ia temukan lewat
+   PID induk. PID di Windows dipakai ulang, dan di runner ada proses sistem yang induknya
+   sudah mati (`winlogon.exe`, `wininit.exe`, `csrss.exe`, `explorer.exe`). Bila `jamu`
+   kebetulan mendapat PID bekas induk itu, `kill` ikut mematikan proses sistem dan
+   mesinnya jatuh. Ini belum dibuktikan langsung. Yang sudah dilakukan: tes kini
+   mematikan `jamu` lewat PID Windows-nya dengan `taskkill`, dan anak-anaknya ikut mati
+   lewat Job Object. Sejak itu dua job Windows lulus; butuh lebih banyak putaran untuk
+   yakin. Ini soal skrip uji, bukan soal `jamu`.
+
+### Hal yang perlu diketahui sebelum memakainya
+
+- **Folder yang ditutup `.htaccess` tetap terbuka.** `check` melaporkannya sebagai masalah,
+  tetapi `serve` tidak menolaknya. Lihat keputusan nomor 1 di bawah.
+- **wp-cron dari baris perintah hanya mengurus situs utama multisite.** Situs lain di
+  jaringan tetap mengandalkan wp-cron bawaan WordPress yang dipicu pengunjung.
+- **Perubahan menjadi multisite baru dikenali setelah `jamu` dinyalakan ulang.**
+- **Mode "mobile device support" WP Super Cache tidak didukung.** Bawaannya mati.
+- **Batas laju email menghitung email, bukan penerima,** dalam jendela satu jam menurut jam dinding. Email
+  pertama yang ditolak dicatat; berikutnya ditolak tanpa baris log sampai jam berganti.
+- **Batas laju bukan pagar terhadap kode yang sudah dikuasai penyerang.** Sandi relay ada
+  di lingkungan proses PHP, sama seperti sandi database. Kode yang bisa menjalankan
+  perintah bisa berbicara SMTP sendiri. Yang ditahan adalah penyalahgunaan `mail()` lewat
+  formulir atau plugin yang bocor. Pagar yang sesungguhnya adalah akun relay per situs
+  dengan batasnya sendiri di sisi penyedia.
+- **Mode teruskan email belum ada di Windows.** Penangkap email untuk development adalah
+  pekerjaan fase 3.
+
+### Hasil uji
+
+`tests/e2e.sh` kini berisi 271 pemeriksaan di jalur php-fpm dan 269 di jalur
+`php-cgi` (keduanya dijalankan di Linux; di CI jalur kedua berjalan di Windows). Tes unit
+34. Mode teruskan email diuji terhadap server SMTP palsu (`tests/smtp_palsu.py`): amplop,
+isi, `-f`, parameter liar, relay mati, pengirim bawaan, dan batas laju.
+
+Yang hanya diuji dari kode sumber dan tes unit, belum terhadap layanan sungguhan:
+
+- Baris "sertifikat terbit", "diperpanjang", dan "pemeriksaan domain gagal". Baris gagal
+  dan "dicoba lagi" sudah diuji dengan CA yang tidak terjangkau.
+- Masuk ke relay dengan akun dan TLS. Jalur sandi (`--passwordeval`) diuji tangan terhadap
+  server palsu dengan CRAM-MD5; TLS ke penyedia sungguhan belum.
+
+### Keputusan yang menunggu owner
+
+1. **Folder yang ditutup `.htaccess`.** Rekomendasi: `serve` menolak sendiri folder yang
+   `.htaccess`-nya berisi larangan untuk seluruh folder (`Deny from all`,
+   `Require all denied`), dibaca saat dinyalakan. Itu kasus yang tidak ambigu dan paling
+   berbahaya bila terlewat (C1, F1). Ini menyentuh keputusan menunda `.htaccess`, jadi
+   tidak saya kerjakan tanpa persetujuan. Kelemahannya: berkas yang dibuat plugin sesudah
+   `serve` jalan baru berlaku setelah dinyalakan ulang.
+2. **wp-cron menyala sendiri di production.** Sama seperti penjadwal Laravel, dengan
+   kejutan yang sama pada pemasangan berreplika. Bisa dimatikan dengan `scheduler = false`.
+3. **Nama variabel dan bawaan mode email:** `JAMU_SMTP_*`, `JAMU_MAIL_FROM`,
+   `JAMU_MAIL_LIMIT` dengan bawaan 200 email per jam. Angka itu perkiraan, bukan hasil ukur.
+4. **msmtp, bukan kode SMTP sendiri.** Mengikuti "rakit, jangan bangun". Harganya satu
+   paket tambahan di image.
+5. **Log JSON ditunda.** Belum ada yang membacanya; formatnya lebih baik ditentukan saat
+   ada pemakai pertama (misalnya pengumpul log di hosting).
+
+### Yang belum
+
+- Sisa hari sertifikat (G3) dan peringatan sebelum kedaluwarsa. Caddy memperpanjang
+  sendiri dan kegagalannya kini tercatat; tampilan sisa hari menunggu dashboard.
+- Pemeriksaan huruf besar-kecil nama berkas (C8) di `check`.
+- Log JSON.
+- Uji `--domain` dengan domain sungguhan terhadap staging Let's Encrypt, uji relay SMTP
+  sungguhan, dan deploy di Dokploy dari image GHCR: perlu dilakukan owner.
+- Syarat lulus fase ini (sejumlah situs berjalan 30 hari) baru bisa dimulai setelah itu.
+
 ## Sumber
 
 - WordPress, deteksi server: `wp-includes/vars.php`, `wp-includes/functions.php`, `wp-admin/includes/misc.php` di https://github.com/WordPress/WordPress
 - php-src: `sapi/cgi/cgi_main.c` dan `sapi/fpm/fpm/fpm_main.c` di https://github.com/php/php-src
 - Plugin yang diperiksa: wp-super-cache, w3-total-cache, wp-rocket, lscache_wp, webp-express, contact-form-7, really-simple-ssl, dan h5bp/server-configs-apache (GitHub)
+- certmagic 0.25.6 (`acmeissuer.go`, `async.go`) dan acmez 3.1.7: pesan log sertifikat dan percobaan ulang lewat staging, https://github.com/caddyserver/certmagic
+- msmtp 1.8: https://marlam.de/msmtp/msmtp.html
 - FrankenPHP di Windows: https://dunglas.dev/2026/03/windows-support-for-frankenphp-its-finally-alive/ dan https://github.com/php/frankenphp/releases/tag/v1.12.0
 - static-php-cli: https://packagist.org/packages/crazywhalecc/static-php-cli
 - MailCrab: https://github.com/tweedegolf/mailcrab
