@@ -1,6 +1,6 @@
 # JamuPHP: handoff v2
 
-Tanggal: 14 November 2026, revisi 14. Menggantikan handoff v1 ("XAMPP berbasis Rust").
+Tanggal: 14 November 2026, revisi 15. Menggantikan handoff v1 ("XAMPP berbasis Rust").
 Nama produk: JamuPHP. Perintahnya `jamu`, file config-nya `jamu.toml`. Repositori:
 https://github.com/cacacuil/jamuphp (lisensi AGPL-3.0).
 
@@ -44,6 +44,10 @@ kabar php-fpm yang terbaca. Penyetelan opcache dan JIT diukur dan ditolak.
 Perubahan di revisi 14: image jamuphp dibandingkan dengan FrankenPHP (mode klasik dan
 worker) dan nginx + php-fpm di CI (bagian 23). Dua pemborosan milik jamu sendiri ketemu
 dan diperbaiki: aturan jenis berkas dan penguraian log akses.
+Perubahan di revisi 15: jalur PHP diprofil (bagian 24). Keluaran PHP kini diteruskan tiap
+20 ms dan pencatat FastCGI per permintaan dibuang; Laravel tanpa cache konfigurasi disebut
+oleh `check` dan `serve`. Worker mode diukur dengan tiga mesin (FrankenPHP, RoadRunner,
+Swoole), termasuk apa yang terjadi saat satu pekerja crash.
 
 ## 1. Inti dalam satu menit
 
@@ -1892,6 +1896,198 @@ PHP satu baris dari 49% ke 53%. Pada Laravel tidak ada perubahan yang berarti (9
 
 `tests/e2e.sh`: 279 pemeriksaan di jalur php-fpm dan 276 di jalur `php-cgi`, semuanya
 lulus di sandbox. 39 tes unit.
+
+## 24. Performa jalur PHP dan worker mode (belum di `main`)
+
+Permintaan owner: perbaiki performanya; kuncinya kecepatan dan kestabilan. Bagian 23
+menunjukkan jamu paling lambat di halaman yang hampir kosong, jadi yang dicari di sini:
+ke mana waktu Caddy habis di jalur PHP, dan apa yang benar-benar menaikkan angka di
+aplikasi nyata.
+
+### Cara mencari
+
+Caddy dijalankan dengan Caddyfile buatan jamu ditambah `admin localhost:2019`, lalu
+profil CPU diambil dari `/debug/pprof/profile` selagi `wrk` membebani. Angka req/dtk di
+sandbox bergoyang sekitar 5%, jadi yang dibandingkan adalah CPU Caddy per permintaan
+(dari `/proc/PID/stat`) pada putaran yang diselang-seling, dengan header seperti kiriman
+browser.
+
+Profil halaman PHP satu baris (23 detik CPU dalam 10 detik):
+
+| Bagian | Porsi CPU Caddy |
+|---|---|
+| Panggilan sistem (baca, tulis, sambung, tutup) | 24% |
+| Pengumpul sampah dan alokasi | 17-18% |
+| Menyambung dan menutup soket ke php-fpm tiap permintaan | sekitar 11% |
+| Menulis jawaban dengan flush di setiap tulisan | 9% |
+| Menyiapkan catatan log per permintaan (`zap.Logger.With`) | 8-9% |
+| Mencari berkas di disk (`try_files`) | 8-9% |
+| Log akses | 6-8% |
+
+Dua baris bisa dihapus tanpa mengubah perilaku; sisanya bawaan Caddy.
+
+### Yang dibangun
+
+1. **Keluaran PHP diteruskan paling lambat 20 ms, bukan di setiap tulisan.** Sebelumnya
+   `flush_interval -1`. Di Caddy 2.11.9 klien FastCGI mengisi panjang jawaban dengan 0
+   bila PHP tidak mengirim `Content-Length`, jadi tanpa `flush_interval` keluaran PHP
+   ditahan sampai selesai; dengan `-1` pemampat dipaksa menutup blok di setiap potongan.
+   20 ms tetap terasa langsung untuk halaman yang mencetak kemajuan, dan
+   `text/event-stream` selalu diteruskan saat itu juga oleh Caddy. Uji e2e keluaran
+   bertahap dan SSE tetap lulus.
+2. **Pencatat transport FastCGI dikeluarkan dari log utama di jalur php-fpm.** Transport
+   itu menyusun catatan berisi seluruh header dan variabel lingkungan untuk tiap
+   permintaan walau tidak ada yang ditulis di tingkat WARN. Bila tidak ada log yang
+   memuat pencatat itu, Caddy memberinya pencatat kosong dan ongkosnya hilang. Di jalur
+   `php-cgi` pencatat itu tetap dipakai karena galat PHP lewat sana (`capture_stderr`).
+   Yang hilang di jalur php-fpm hanya peringatan "jawaban lebih panjang dari
+   `Content-Length`"; peringatan "jawaban terputus" berasal dari pencatat lain dan tetap ada.
+3. **Laravel tanpa cache konfigurasi disebut oleh `jamu check` dan `jamu serve`** di mode
+   production (bukan dev). Ini temuan terbesar di bagian ini, lihat tabel di bawah.
+
+Hasil dua perubahan pertama, di sandbox lewat jamu sendiri (header browser, 32 koneksi):
+
+| Beban | Sebelum | Sesudah |
+|---|---|---|
+| Halaman PHP satu baris | 5.895-6.320 req/dtk | 6.717-6.790 (+7 sampai 14%) |
+| Halaman PHP 60 KB, dimampatkan | 1.695-1.803 req/dtk, p50 17-18 ms | 2.056-2.077 (+15 sampai 22%), p50 15 ms |
+| Laravel `/up` | 947-1.009 | 992-1.044 (di dalam derau) |
+| WordPress | 46,7-48,5 | 42,4-48,8 (tidak berubah) |
+
+CPU Caddy per permintaan pada halaman satu baris turun dari 434 ke 367 mikrodetik
+(-15%). Halaman 60 KB yang dimampatkan juga sedikit lebih kecil (11.229 ke 10.995 byte)
+karena pemampat tidak lagi dipotong-potong.
+
+Di CI (`docs/benchmark/banding/hasil-2026-11-14-b.md`, 64 koneksi): halaman satu baris
+10.360 ke 11.541 req/dtk (+11%; terhadap FrankenPHP klasik dari 53% ke 58%). Berkas
+statis, Laravel, dan WordPress tidak berubah (Laravel `/up` 1.423 ke 1.412, WordPress
+63,5 ke 62,5). Kolom baru `64z` meminta jawaban dimampatkan seperti browser: pada
+halaman sambutan Laravel jamu 975, FrankenPHP klasik 954, nginx 1.017 req/dtk.
+
+**Yang terbaca:** penyetelan gateway terasa di halaman kecil dan halaman yang
+dimampatkan, dan tidak terasa di Laravel dan WordPress, karena di sana waktunya habis di
+PHP. Selisih jamu terhadap nginx di Laravel (sekitar 10%) adalah ongkos Caddy per
+permintaan dan tidak bisa dihapus dari Caddyfile.
+
+### Cache konfigurasi Laravel
+
+Laravel yang sama, sandbox, `/up`, 32 koneksi:
+
+| Keadaan | req/dtk |
+|---|---|
+| Apa adanya sesudah `composer install` | 532 |
+| `APP_ENV=production`, `APP_DEBUG=false` | 556 |
+| Rute dan event di-cache, konfigurasi tidak | 584 |
+| Hanya cache konfigurasi | 978 |
+| `php artisan optimize` | 979 |
+
+Cache konfigurasi sendirian memberi +67%; tidak ada penyetelan server yang mendekati
+itu. Karena itu `jamu check` dan `jamu serve` menyebutnya bila `bootstrap/cache/config.php`
+belum ada. Catatan: `composer dump-autoload -o` menghapus cache itu (skrip
+`post-autoload-dump` Laravel), dan peta kelasnya sendiri tidak menambah apa-apa.
+
+jamu **belum** menjalankan `artisan optimize` sendiri. Di container variabel lingkungan
+baru ada saat container menyala, jadi cache tidak boleh dibuat di Dockerfile; ia harus
+dibuat saat start. Risikonya: aplikasi yang memanggil `env()` di luar berkas konfigurasi
+mendapat `null` begitu konfigurasi di-cache. Ini keputusan owner (lihat di bawah).
+
+### Yang diukur dan ditolak
+
+- **Membuang header dari log akses dengan encoder `filter`.** Lebih lambat, bukan lebih
+  cepat: CPU Caddy per permintaan +3% sampai +12%.
+- **Mengeluarkan pencatat `reverse_proxy` juga.** Tidak menambah apa-apa di atas butir 2
+  (-8,2% lawan -8,6%), dan peringatan "jawaban terputus" akan hilang.
+- **Menjaga satu pekerja php-fpm tetap hidup, atau waktu diam yang lebih panjang.**
+  Permintaan pertama sesudah diam 13 detik memakan 11-16 ms, yang hangat 4-8 ms: selisih
+  6-11 ms sekali per masa diam, dibayar dengan memori satu pekerja sepanjang waktu. Di
+  container, HEALTHCHECK 10 detik sudah menjaga satu pekerja hidup. Permintaan pertama
+  sejak start (202 ms) adalah opcache yang masih kosong, bukan ondemand.
+- **`opcache.validate_timestamps=0`.** 915-936 lawan 854-977 req/dtk: tidak terukur, dan
+  deploy jadi butuh reload.
+
+### Worker mode: tiga mesin, satu aplikasi
+
+Bagian 23 menunjukkan worker mode FrankenPHP 2 sampai 2,7 kali lebih cepat tetapi satu
+crash PHP menjatuhkan seluruh server. Pertanyaannya: apakah Laravel Octane dengan mesin
+yang tiap pekerjanya proses sendiri (RoadRunner, Swoole) memberi kecepatan itu tanpa
+kelemahan itu. Diukur di CI (`MODE=worker` di `banding.sh`, branch `banding-worker`;
+tabel lengkap `docs/benchmark/banding/hasil-2026-11-14-worker.md`).
+
+Susunan Octane: image aplikasi yang sama dengan jamu, ditambah `laravel/octane`,
+extension `pcntl`, lalu `sockets` + program `rr` 2025.1.15 (RoadRunner) atau extension
+`swoole` 6.2.5. `php artisan octane:start` dengan 8 pekerja di port loopback, dan Caddy
+yang sama di depannya (`Caddyfile.octane`: berkas statis dari Caddy, sisanya
+`reverse_proxy`). Opcache dinyalakan untuk PHP baris perintah dan pekerja diganti tiap
+1.000 permintaan, sama dengan berkas worker FrankenPHP.
+
+| Laravel, 64 koneksi | jamu (php-fpm) | FrankenPHP worker | Octane RoadRunner | Octane Swoole |
+|---|---|---|---|---|
+| `/up`, req/dtk | 1.411 | 3.465 | 1.548 | 2.274 |
+| `/` (halaman sambutan), req/dtk | 1.013 | 2.050 | 939 | 1.077 |
+| p99 `/up` | 58 ms | 32 ms | 119 ms | 390 ms |
+| p99 `/up` di 8 koneksi | 12 ms | 5 ms | 370 ms | 175 ms |
+| Memori di bawah beban | 74-79 MB | 73-77 MB | 427-437 MB | 332-347 MB |
+| Memori saat diam | 45 MB | 106 MB | 304 MB | 299 MB |
+| Siap melayani | 350 ms | 460 ms | 780 ms | 699 ms |
+| Ukuran image | 764 MB | 633 MB | 824 MB | 836 MB |
+
+Satu pekerja PHP crash (SIGSEGV) selagi `/up` dibebani 16 koneksi:
+
+| | jamu (php-fpm) | FrankenPHP worker | Octane RoadRunner | Octane Swoole |
+|---|---|---|---|---|
+| Permintaan yang crash | 502 | koneksi putus | 500 | koneksi putus |
+| Permintaan lain yang gagal | 0 dari 15.118 | semua yang sedang berjalan | 0 dari 17.292 | 0 dari 25.041 |
+| Situs tidak menjawab | 0 ms | sekitar 800 ms | 0 ms | 0 ms |
+| Container diulang Docker | tidak | ya | tidak | tidak |
+
+Yang terbaca:
+
+1. **Kestabilan: dugaan benar.** RoadRunner dan Swoole mengurung crash di satu pekerja,
+   sama seperti php-fpm. Hanya FrankenPHP yang jatuh seluruhnya.
+2. **Kecepatan: tidak seperti yang diharapkan.** RoadRunner hampir tidak lebih cepat dari
+   php-fpm (+10% di `/up`, -7% di `/`). Swoole +61% di `/up` dan +6% di `/`. Keduanya jauh
+   di bawah FrankenPHP worker.
+3. **Ekor latensi Octane buruk**: p99 ratusan milidetik, bahkan di 8 koneksi. jamu 12 ms.
+4. **Memori Octane empat sampai enam kali jamu**, juga saat diam, karena 8 pekerja hidup
+   terus dan masing-masing memegang aplikasinya sendiri.
+
+**Batas pengukuran ini, dibaca dulu sebelum memutuskan.** Angka Octane adalah susunan
+bawaan `octane:start`, bukan hasil penyetelan. Run pertama tanpa opcache di baris perintah
+dan dengan pekerja diganti tiap 500 permintaan memberi angka yang sama (RoadRunner `/up`
+1.562, Swoole 2.250), jadi kedua hal itu bukan sebabnya. Sebab RoadRunner dan Swoole
+tertinggal sejauh itu dari FrankenPHP worker, dan sebab ekor latensinya, **belum
+ditemukan**; kemungkinan yang belum diperiksa: cara Swoole membagi koneksi dari Caddy ke
+pekerja, dan ongkos menyalakan pekerja pengganti. Sampai itu jelas, angka kecepatan Octane
+di sini adalah batas bawah, bukan putusan. Temuan kestabilan dan memorinya tidak
+bergantung pada penyetelan itu.
+
+Yang perlu ditambahkan ke image supaya Octane jalan (dicatat karena gagal dulu di CI):
+`composer require` paket RoadRunner menuntut `ext-sockets`; Octane sendiri butuh `pcntl`
+(tanpa itu: `Undefined constant SIGINT`).
+
+### Keputusan yang menunggu owner
+
+1. **Menggabungkan `stabil-performa` ke `main`.** Image `:8.4` terbit ulang.
+2. **`artisan optimize` otomatis saat start di mode production.** Untungnya +67% bagi
+   siapa pun yang lupa; risikonya aplikasi yang memanggil `env()` di luar berkas
+   konfigurasi. Kalau dikerjakan, perlu jalan keluar di `jamu.toml`. Sekarang jamu hanya
+   menyebutnya.
+3. **Worker mode.** Dari tiga mesin, tidak ada yang sekaligus cepat, hemat memori, dan
+   tahan crash: FrankenPHP cepat dan hemat tetapi jatuh seluruhnya; RoadRunner dan Swoole
+   tahan crash tetapi boros memori dan, sejauh yang terukur, tidak cukup cepat. Baris
+   "Worker mode" di bagian 5 tetap: tunggu pelanggan Laravel yang meminta.
+
+### Hasil uji
+
+`tests/e2e.sh`: 290 pemeriksaan di jalur php-fpm dan 287 di jalur `php-cgi`, semuanya
+lulus di sandbox. 40 tes unit. Yang baru: catatan cache konfigurasi Laravel di `check`
+dan `serve` (muncul di production, diam di dev, hilang sesudah cache dibuat), dan keluaran
+bertahap yang tetap mengalir saat dimampatkan dan untuk SSE. Dua tes terakhir dibuktikan
+gagal dengan `flush_interval 5s`.
+
+Satu kali di CI, `tests/image.sh` gagal di `jamu composer --version` lalu lulus di run
+berikutnya dengan kode yang sama. Sebabnya belum diketahui; tes itu kini mencetak
+keluaran perintahnya supaya kejadian berikutnya bisa dibaca.
 
 ## Sumber
 
