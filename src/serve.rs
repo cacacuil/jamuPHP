@@ -43,32 +43,26 @@ fn free_port() -> Result<u16, String> {
     l.local_addr().map(|a| a.port()).map_err(|e| e.to_string())
 }
 
-/// Folder yang harus bisa ditulis PHP. Di container ini sumber masalah nomor satu: volume
-/// milik root, PHP berjalan sebagai www-data, lalu unggahan gagal tanpa pesan yang jelas.
-fn warn_unwritable(p: &Project) {
+/// Folder yang harus bisa ditulis PHP tetapi tidak bisa, beserta siapa yang gagal menulis.
+/// Di container ini sumber masalah nomor satu: volume milik root, PHP berjalan sebagai
+/// www-data, lalu unggahan gagal tanpa pesan yang jelas.
+pub fn unwritable(p: &Project) -> Vec<(PathBuf, String)> {
     let dirs = match p.kind {
         Kind::WordPress => vec![p.root.join("wp-content")],
         Kind::Laravel => vec![p.dir.join("storage"), p.dir.join("bootstrap/cache")],
         Kind::Php => vec![],
     };
-    for d in dirs.iter().filter(|d| d.is_dir()) {
-        if let Some(who) = os::unwritable(d) {
-            say!(
-                "jamu: peringatan: {} tidak bisa ditulis oleh {who}; unggahan, cache, atau log situs akan gagal",
-                d.display()
-            );
-        }
-    }
+    dirs.into_iter()
+        .filter(|d| d.is_dir())
+        .filter_map(|d| os::unwritable(&d).map(|who| (d, who)))
+        .collect()
 }
 
-pub fn serve(o: Opts) -> Result<(), String> {
-    os::init();
-    let (project, settings) = settings::load(&o.dir)?;
-    let dev = o.domain.is_none() && !o.behind_proxy;
-    let caddy = find_bin("JAMU_CADDY", &["caddy"])?;
-    // JAMU_PHP_CGI di Linux memaksa jalur php-cgi, supaya jalur Windows bisa diuji di Linux.
+/// Program PHP yang melayani situs: php-fpm, atau php-cgi di Windows.
+/// JAMU_PHP_CGI di Linux memaksa jalur php-cgi, supaya jalur Windows bisa diuji di Linux.
+pub fn find_php() -> Result<(bool, PathBuf), String> {
     let cgi = cfg!(windows) || env::var_os("JAMU_PHP_CGI").is_some();
-    let php_bin = if cgi {
+    let bin = if cgi {
         find_bin(
             "JAMU_PHP_CGI",
             &[
@@ -91,9 +85,53 @@ pub fn serve(o: Opts) -> Result<(), String> {
             ],
         )?
     };
+    Ok((cgi, bin))
+}
+
+pub fn write(p: &Path, text: String) -> Result<(), String> {
+    fs::write(p, text).map_err(|e| format!("tidak bisa menulis {}: {e}", p.display()))
+}
+
+/// Menulis konfigurasi PHP ke `dir`. Soket php-fpm selalu di folder state, supaya `check`
+/// menguji konfigurasi yang sama dengan yang dipakai `serve`.
+pub fn write_php(
+    dir: &Path,
+    state: &Path,
+    (cgi, bin): (bool, PathBuf),
+    dev: bool,
+    settings: &settings::Settings,
+) -> Result<Php, String> {
+    if cgi {
+        let ini = dir.join("php.ini");
+        write(&ini, cgi_ini(&bin, dev, &settings.ini()))?;
+        return Ok(Php::Cgi {
+            bin,
+            ini,
+            port: free_port()?,
+        });
+    }
+    // Panjang path soket Unix dibatasi kernel (108 byte).
+    let mut sock = state.join("php-fpm.sock");
+    if sock.as_os_str().len() > 100 {
+        sock = PathBuf::from(format!(
+            "/tmp/jamu-{:08x}.sock",
+            fnv1a(state.as_os_str().as_encoded_bytes())
+        ));
+    }
+    let conf = dir.join("php-fpm.conf");
+    write(&conf, fpm_conf(&sock, dev, &settings.ini()))?;
+    Ok(Php::Fpm { bin, conf, sock })
+}
+
+pub fn serve(o: Opts) -> Result<(), String> {
+    os::init();
+    let (project, settings) = settings::load(&o.dir)?;
+    let dev = o.domains.is_empty() && !o.behind_proxy;
+    let caddy = find_bin("JAMU_CADDY", &["caddy"])?;
+    let found_php = find_php()?;
 
     let free = |p: u16| port_free(p, dev);
-    let port = match (&o.domain, o.port) {
+    let port = match (o.domains.first(), o.port) {
         (Some(_), _) => {
             for p in [80, 443] {
                 if !free(p) {
@@ -129,35 +167,10 @@ pub fn serve(o: Opts) -> Result<(), String> {
     };
 
     let state = open_state(&project.dir)?;
-    let write = |p: &Path, text: String| {
-        fs::write(p, text).map_err(|e| format!("tidak bisa menulis {}: {e}", p.display()))
-    };
-    let php = if cgi {
-        let ini = state.join("php.ini");
-        write(&ini, cgi_ini(&php_bin, dev, &settings.ini()))?;
-        Php::Cgi {
-            bin: php_bin,
-            ini,
-            port: free_port()?,
-        }
-    } else {
-        // Panjang path soket Unix dibatasi kernel (108 byte).
-        let mut sock = state.join("php-fpm.sock");
-        if sock.as_os_str().len() > 100 {
-            sock = PathBuf::from(format!(
-                "/tmp/jamu-{:08x}.sock",
-                fnv1a(state.as_os_str().as_encoded_bytes())
-            ));
-        }
-        let _ = fs::remove_file(&sock);
-        let conf = state.join("php-fpm.conf");
-        write(&conf, fpm_conf(&sock, dev, &settings.ini()))?;
-        Php::Fpm {
-            bin: php_bin,
-            conf,
-            sock,
-        }
-    };
+    let php = write_php(&state, &state, found_php, dev, &settings)?;
+    if let Php::Fpm { sock, .. } = &php {
+        let _ = fs::remove_file(sock);
+    }
     let (php_bin, how) = match &php {
         Php::Fpm { bin, .. } => (
             bin,
@@ -260,30 +273,29 @@ pub fn serve(o: Opts) -> Result<(), String> {
     if let Some(task) = &plan.schedule {
         say!("jamu: penjadwal aktif ({} tiap menit)", task.run);
     }
-    warn_unwritable(&project);
+    for (d, who) in unwritable(&project) {
+        say!(
+            "jamu: peringatan: {} tidak bisa ditulis oleh {who}; unggahan, cache, atau log situs akan gagal",
+            d.display()
+        );
+    }
 
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
     ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst)).map_err(|e| e.to_string())?;
 
-    let url = match &o.domain {
+    let url = match o.domains.first() {
         Some(d) => format!("https://{d}"),
         None if o.behind_proxy => format!("port {port}, di belakang proxy"),
         None => format!("http://localhost:{port}"),
     };
-    let domain_mode = o.domain.is_some();
     supervise(&plan, &stop, move || {
         // Tunggu sampai port benar-benar menerima koneksi sebelum mengumumkan siap.
         thread::spawn(move || {
             let until = Instant::now() + Duration::from_secs(15);
             while Instant::now() < until {
                 if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                    let note = if domain_mode {
-                        " (sertifikat diterbitkan dan diperbarui otomatis)"
-                    } else {
-                        ""
-                    };
-                    say!("jamu: siap di {url}{note}");
+                    say!("jamu: siap di {url}");
                     return;
                 }
                 thread::sleep(Duration::from_millis(100));

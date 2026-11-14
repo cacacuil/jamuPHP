@@ -270,7 +270,7 @@ fn wp_cache_rule(o: &Opts) -> (String, String) {
                 ),
             ),
         ]
-    } else if o.domain.is_some() {
+    } else if !o.domains.is_empty() {
         vec![
             (
                 "wpsc_https",
@@ -309,8 +309,15 @@ fn wp_cache_rule(o: &Opts) -> (String, String) {
 pub fn caddyfile(p: &Project, o: &Opts, port: u16, state: &Path, php: &Php) -> String {
     let mut s = String::from("{\n\tadmin off\n\tpersist_config off\n");
     s += &format!("\tstorage file_system {}\n", q(&state.join("caddy")));
-    s += "\tlog {\n\t\tlevel WARN\n\t}\n";
-    if o.domain.is_none() {
+    if o.domains.is_empty() {
+        s += "\tlog {\n\t\tlevel WARN\n\t}\n";
+    } else {
+        // Terbit dan diperpanjangnya sertifikat adalah berita, walau Caddy mencatatnya sebagai
+        // INFO. Supervisor meringkas baris-baris ini dan membuang sisanya.
+        s += "\tlog {\n\t\tlevel WARN\n\t\texclude tls.obtain tls.renew\n\t}\n";
+        s += "\tlog sertifikat {\n\t\tlevel INFO\n\t\tinclude tls.obtain tls.renew\n\t\tformat json\n\t}\n";
+    }
+    if o.domains.is_empty() {
         // Tanpa TLS hanya HTTP/1.1 yang berlaku; menyebutnya terang-terangan membungkam
         // peringatan Caddy soal HTTP/2 dan HTTP/3 di setiap start.
         s += "\tservers {\n\t\tprotocols h1\n";
@@ -322,7 +329,7 @@ pub fn caddyfile(p: &Project, o: &Opts, port: u16, state: &Path, php: &Php) -> S
         }
         s += "\t}\n";
     }
-    match &o.domain {
+    match o.domains.first() {
         None => s += "\tauto_https off\n",
         Some(_) => {
             if let Some(e) = &o.email {
@@ -338,11 +345,11 @@ pub fn caddyfile(p: &Project, o: &Opts, port: u16, state: &Path, php: &Php) -> S
     }
     s += "}\n\n";
 
-    match &o.domain {
+    match o.domains.first() {
         // Dev hanya mendengarkan di loopback: situs lokal tidak boleh terbuka ke jaringan.
         None if o.behind_proxy => s += &format!("http://:{port} {{\n"),
         None => s += &format!("http://:{port} {{\n\tbind 127.0.0.1\n"),
-        Some(d) => s += &format!("{d} {{\n"),
+        Some(_) => s += &format!("{} {{\n", o.domains.join(", ")),
     }
     s += &format!("\troot * {}\n", q(&p.root));
     s += "\trequest_body {\n\t\tmax_size 128MB\n\t}\n";
@@ -501,7 +508,7 @@ mod tests {
 
         // Mode domain: HTTPS dikenali dari koneksinya sendiri.
         let domain = text(Opts {
-            domain: Some("situs.test".into()),
+            domains: vec!["situs.test".into()],
             ..opts()
         });
         assert!(domain.contains("protocol https") && domain.contains("protocol http\n"));
@@ -551,13 +558,33 @@ mod tests {
         let dir = project(&["index.php"]);
         let o = Opts {
             dir: dir.clone(),
-            domain: Some("situs.test".into()),
+            domains: vec!["situs.test".into()],
             ..Default::default()
         };
         let text = caddyfile(&detect(&dir), &o, 443, Path::new("/s"), &fpm());
         assert!(text.contains("situs.test {"));
         assert!(!text.contains("auto_https off"));
         assert!(!text.contains("@uploads_php"));
+        // Kabar sertifikat dicatat terpisah, dan tidak dobel di log utama.
+        assert!(text.contains("exclude tls.obtain tls.renew"));
+        assert!(text.contains("log sertifikat {"));
+
+        // Beberapa nama: satu situs, satu blok.
+        let o = Opts {
+            dir: dir.clone(),
+            domains: vec!["situs.test".into(), "www.situs.test".into()],
+            ..Default::default()
+        };
+        let text = caddyfile(&detect(&dir), &o, 443, Path::new("/s"), &fpm());
+        assert!(text.contains("\nsitus.test, www.situs.test {\n"));
+
+        // Di luar mode domain tidak ada yang perlu dicatat soal sertifikat.
+        let o = Opts {
+            dir: dir.clone(),
+            ..Default::default()
+        };
+        let text = caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), &fpm());
+        assert!(!text.contains("sertifikat"));
     }
 
     #[test]

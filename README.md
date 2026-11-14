@@ -3,7 +3,7 @@
 Paket server PHP untuk development dan production: satu perintah mengenali project,
 lalu menyalakan dan mengawasi Caddy dan php-fpm. Tanpa file konfigurasi.
 
-Status: fase 1 (core headless) sedang dikerjakan, belum untuk dipakai pelanggan. Berjalan
+Status: fase 2 (production) sedang dikerjakan, belum untuk dipakai pelanggan. Berjalan
 di Linux (php-fpm) dan Windows (php-cgi dari zip resmi PHP). Rencana lengkap, hasil
 pengukuran, dan hasil uji ada di [docs/HANDOFF.md](docs/HANDOFF.md).
 
@@ -27,7 +27,23 @@ Production, dengan sertifikat yang diterbitkan dan diperbarui otomatis:
 ./target/release/jamu serve /path/ke/project --domain contoh.com --email anda@contoh.com
 ```
 
+`--domain` boleh diulang, misalnya untuk nama dengan dan tanpa `www`. Terbit, gagal, dan
+diperpanjangnya sertifikat dicatat di log sebagai baris `jamu: sertifikat ...`; bila gagal,
+alasan dari CA ikut ditampilkan dan penerbitan dicoba lagi sendiri.
+
 Bila `caddy` atau `php-fpm` tidak ada di `PATH`, tunjuk lewat `JAMU_CADDY` dan `JAMU_PHP_FPM`.
+
+Memeriksa project sebelum dinyalakan atau dikirim ke server, dengan opsi yang sama seperti
+`serve`. Keluar dengan kode 1 bila ada masalah, jadi bisa dipasang di CI:
+
+```bash
+jamu check /path/ke/project --behind-proxy
+```
+
+Yang diperiksa: `jamu.toml`, versi PHP, konfigurasi Caddy dan php-fpm yang akan dipakai,
+ekstensi yang diminta paket Composer, folder yang harus bisa ditulis, `APP_KEY` dan
+`APP_DEBUG` Laravel, rekaman DNS untuk `--domain`, dan folder yang ditutup lewat
+`.htaccess` (`jamu` tidak membaca `.htaccess`, jadi folder seperti itu terbuka).
 
 PHP dan Composer untuk project ini, yaitu PHP yang sama dengan yang melayani situsnya:
 
@@ -47,7 +63,7 @@ Taruh `jamu.toml` di folder project hanya bila ada yang perlu ditimpa:
 ```toml
 php  = "8.4"            # tolak jalan dengan versi PHP lain
 root = "public"         # document root
-scheduler = true        # penjadwal Laravel; bawaan: menyala kecuali di mode dev
+scheduler = true        # penjadwal; bawaan: menyala kecuali di mode dev
 
 [ini]
 memory_limit = "512M"
@@ -57,8 +73,32 @@ name = "queue"
 run  = "php artisan queue:work --tries=3"
 ```
 
-Pekerja dinyalakan bersama situs, diawasi, dan dinyalakan ulang bila mati. Untuk Laravel,
-`schedule:run` dijalankan tiap menit tanpa cron. Kunci yang tidak dikenal ditolak.
+Pekerja dinyalakan bersama situs, diawasi, dan dinyalakan ulang bila mati. Penjadwal
+menggantikan baris cron: tiap menit ia menjalankan `schedule:run` untuk Laravel dan
+`wp-cron.php` untuk WordPress. Kunci yang tidak dikenal ditolak.
+
+## WordPress
+
+Tidak ada yang perlu diatur. Yang sudah diurus `jamu`:
+
+- Berkas PHP di folder unggahan tidak dijalankan.
+- Multisite subdirektori dikenali dari `wp-config.php` dan aturan tulis ulangnya dipasang
+  sendiri. Nyalakan ulang `jamu` setelah mengubah situs menjadi multisite.
+- Bila WP Super Cache terpasang dan aktif, halaman yang sudah di-cache disajikan langsung
+  dari berkas buatan plugin tanpa menyentuh PHP. Pengunjung yang login, yang berkomentar,
+  dan permintaan dengan query string tetap dilayani PHP. Mode "mobile device support"
+  plugin itu tidak didukung; biarkan mati (bawaannya memang mati).
+- `wp-cron.php` dijalankan tiap menit, jadi tulisan terjadwal terbit tepat waktu walau
+  situs sedang sepi.
+
+## Log
+
+Semua keluar di stderr, satu baris per kejadian, dengan awalan sumbernya: `jamu:`,
+`[caddy]`, `[php-fpm]`, `[schedule]`, nama pekerja, dan `[akses]` untuk tiap permintaan:
+
+```
+[akses] 203.0.113.9 GET /produk/ 200 12 ms
+```
 
 ## Windows
 

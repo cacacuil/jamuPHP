@@ -43,21 +43,89 @@ fn access_line(v: &serde_json::Value) -> Option<String> {
     ))
 }
 
-/// Dua jenis baris Caddy ditulis ulang: log akses, dan catatan galat PHP di jalur php-cgi,
-/// yang tiba lewat Caddy terbungkus JSON dan ditampilkan isinya saja seperti di jalur php-fpm.
+/// Kabar soal sertifikat, dalam satu baris yang bisa dibaca tanpa mengenal ACME.
+fn cert_line(v: &serde_json::Value) -> Option<String> {
+    let id = v["identifier"].as_str();
+    match v["msg"].as_str()? {
+        "certificate obtained successfully" => {
+            Some(format!("jamu: sertifikat untuk {} terbit", id?))
+        }
+        "certificate renewed successfully" => {
+            Some(format!("jamu: sertifikat untuk {} diperpanjang", id?))
+        }
+        "could not get certificate from issuer" => Some(format!(
+            "jamu: sertifikat untuk {} belum terbit: {}",
+            id?,
+            v["error"].as_str()?
+        )),
+        "will retry" if v["logger"].as_str()?.starts_with("tls.") => {
+            let secs = v["retrying_in"].as_f64()?;
+            let wait = if secs >= 3600.0 {
+                format!("{} jam", (secs / 3600.0).round())
+            } else {
+                format!("{} menit", (secs / 60.0).ceil())
+            };
+            Some(format!(
+                "jamu: sertifikat dicoba lagi dalam {wait}; situs tetap dilayani"
+            ))
+        }
+        // Penolakan dari CA: ia yang melihat domain ini dari internet, jadi penjelasannya
+        // diteruskan apa adanya, didahului artinya.
+        "challenge failed" => {
+            let problem = &v["problem"];
+            let why = match problem["type"].as_str()?.rsplit(':').next()? {
+                "dns" => "DNS domain itu belum benar",
+                "connection" => "alamat di DNS domain itu tidak sampai ke server ini",
+                "unauthorized" => "yang menjawab di alamat DNS domain itu bukan server ini",
+                "caa" => "rekaman CAA domain itu melarang CA ini",
+                "rateLimited" => "batas permintaan CA tercapai",
+                _ => "ditolak CA",
+            };
+            Some(format!(
+                "jamu: pemeriksaan domain {} gagal: {why} ({})",
+                id?,
+                problem["detail"].as_str()?
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Peringatan Caddy yang selalu muncul karena cara jamu memakainya, bukan karena ada masalah.
+const CADDY_NOISE: &[&str] = &[
+    "admin endpoint disabled",
+    "HTTP/2 skipped because it requires TLS",
+    "HTTP/3 skipped because it requires TLS",
+];
+
+/// Baris Caddy yang ditulis ulang: log akses, kabar sertifikat, dan catatan galat PHP di
+/// jalur php-cgi, yang tiba lewat Caddy terbungkus JSON dan ditampilkan isinya saja seperti
+/// di jalur php-fpm. Sisanya diteruskan apa adanya.
 fn caddy_log(name: &str, line: &str) -> Option<String> {
-    if line.contains(r#""logger":"http.log.access"#)
-        && let Ok(v) = serde_json::from_str::<serde_json::Value>(line)
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        return plain_log(name, line);
+    };
+    let msg = v["msg"].as_str().unwrap_or_default();
+    if v["logger"]
+        .as_str()
+        .is_some_and(|l| l.starts_with("http.log.access"))
         && let Some(text) = access_line(&v)
     {
         return Some(text);
     }
-    if line.contains(r#""msg":"stderr""#)
-        && let Ok(v) = serde_json::from_str::<serde_json::Value>(line)
+    if msg == "stderr"
         && let Some(body) = v["body"].as_str()
     {
         let lines: Vec<String> = body.lines().map(|l| format!("[php-cgi] {l}")).collect();
         return Some(lines.join("\n"));
+    }
+    if let Some(text) = cert_line(&v) {
+        return Some(text);
+    }
+    // Selain log akses, baris INFO hanya datang dari pencatat sertifikat: langkah-langkah
+    // kecil yang tidak perlu dibaca siapa pun.
+    if v["level"] == "info" || CADDY_NOISE.contains(&msg) {
+        return None;
     }
     plain_log(name, line)
 }
@@ -344,5 +412,58 @@ mod tests {
             caddy_log("caddy", "bukan json").as_deref(),
             Some("[caddy] bukan json")
         );
+    }
+
+    #[test]
+    fn kabar_sertifikat_diringkas() {
+        let log = |line: &str| caddy_log("caddy", line);
+        // Dua baris ini disalin dari Caddy 2.11 yang tidak bisa menghubungi CA.
+        let gagal = r#"{"level":"error","ts":1794659699.1332648,"logger":"tls.obtain","msg":"could not get certificate from issuer","identifier":"uji.invalid","issuer":"127.0.0.1:9-dir","error":"registering account [] with server: provisioning client: performing request: Get \"https://127.0.0.1:9/dir\": dial tcp 127.0.0.1:9: connect: connection refused"}"#;
+        let text = log(gagal).unwrap();
+        assert!(text.starts_with("jamu: sertifikat untuk uji.invalid belum terbit: registering"));
+        let ulang = r#"{"level":"error","ts":1794659699.1333046,"logger":"tls.obtain","msg":"will retry","error":"[uji.invalid] Obtain: x","attempt":1,"retrying_in":60,"elapsed":0.506289221,"max_duration":2592000}"#;
+        assert_eq!(
+            log(ulang).as_deref(),
+            Some("jamu: sertifikat dicoba lagi dalam 1 menit; situs tetap dilayani")
+        );
+        let lama = r#"{"level":"error","logger":"tls.renew","msg":"will retry","error":"x","attempt":9,"retrying_in":21600}"#;
+        assert!(log(lama).unwrap().contains("dalam 6 jam"));
+
+        let terbit = r#"{"level":"info","ts":1.0,"logger":"tls.obtain","msg":"certificate obtained successfully","identifier":"situs.com","issuer":"acme-v02.api.letsencrypt.org-directory"}"#;
+        assert_eq!(
+            log(terbit).as_deref(),
+            Some("jamu: sertifikat untuk situs.com terbit")
+        );
+        let panjang = r#"{"level":"info","ts":1.0,"logger":"tls.renew","msg":"certificate renewed successfully","identifier":"situs.com","issuer":"x"}"#;
+        assert_eq!(
+            log(panjang).as_deref(),
+            Some("jamu: sertifikat untuk situs.com diperpanjang")
+        );
+
+        let dns = r#"{"level":"error","ts":1.0,"logger":"tls.issuance.acme.acme_client","msg":"challenge failed","identifier":"situs.com","challenge_type":"http-01","problem":{"type":"urn:ietf:params:acme:error:dns","title":"","detail":"DNS problem: NXDOMAIN looking up A for situs.com","instance":"","subproblems":[]}}"#;
+        assert_eq!(
+            log(dns).as_deref(),
+            Some(
+                "jamu: pemeriksaan domain situs.com gagal: DNS domain itu belum benar (DNS problem: NXDOMAIN looking up A for situs.com)"
+            )
+        );
+        let caa = r#"{"level":"error","logger":"tls.issuance.acme.acme_client","msg":"challenge failed","identifier":"situs.com","challenge_type":"http-01","problem":{"type":"urn:ietf:params:acme:error:caa","detail":"CAA record for situs.com prevents issuance"}}"#;
+        assert!(
+            log(caa)
+                .unwrap()
+                .contains("rekaman CAA domain itu melarang CA ini")
+        );
+
+        // Langkah kecil dan peringatan bawaan dibuang; galat lain tetap lewat apa adanya.
+        let langkah = r#"{"level":"info","logger":"tls.obtain","msg":"acquiring lock","identifier":"situs.com"}"#;
+        assert_eq!(log(langkah), None);
+        let admin = r#"{"level":"warn","ts":1.0,"logger":"admin","msg":"admin endpoint disabled"}"#;
+        assert_eq!(log(admin), None);
+        let lain = r#"{"level":"error","logger":"tls","msg":"job failed","error":"x"}"#;
+        assert_eq!(log(lain), Some(format!("[caddy] {lain}")));
+        // "will retry" milik bagian lain Caddy bukan urusan sertifikat.
+        let bukan =
+            r#"{"level":"error","logger":"http.handlers.x","msg":"will retry","retrying_in":5}"#;
+        assert_eq!(log(bukan), Some(format!("[caddy] {bukan}")));
     }
 }

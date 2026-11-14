@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Uji end-to-end binary jamu: PHP biasa, Laravel, WordPress.
-# Pemakaian: JAMU=... LARAVEL_DIR=... WP_DIR=... bash tests/e2e.sh
+# Pemakaian: JAMU=... LARAVEL_DIR=... WP_DIR=... [GRUP=...] bash tests/e2e.sh
 set -u
 
 JAMU="${JAMU:-./target/release/jamu}"
@@ -619,12 +619,94 @@ grup_wp() {
   akhir_grup "$log"
 }
 
-grup_php
-grup_proxy
-grup_toml
-grup_wp_aturan
-grup_laravel
-grup_wp
+# Jalankan `jamu check`; hasilnya di $keluaran dan $rc.
+periksa() { keluaran=$("$JAMU" check "$@" 2>&1); rc=$?; }
+
+grup_check() {
+  echo "== jamu check =="
+  local d="$work/check" log="$work/check.log" keluaran rc
+  mkdir -p "$d/polos" "$d/wp/wp-content/uploads/pribadi" "$d/wp/wp-content/uploads/gambar" \
+    "$d/laravel/public" "$d/toml"
+  printf '%s\n' '<?php echo "polos";' > "$d/polos/index.php"
+
+  periksa "$d/polos"
+  cek "situs bersih: kode keluar 0" "$rc" 0 "$keluaran"
+  cek "situs bersih: tidak ada masalah" "$(has "$keluaran" 'Tidak ada masalah')" yes "$keluaran"
+  cek "situs bersih: konfigurasi Caddy diuji" "$(has "$keluaran" 'konfigurasi Caddy diterima')" yes "$keluaran"
+  periksa "$d/polos" --behind-proxy
+  cek "mode proxy: konfigurasi diterima" "$rc" 0 "$keluaran"
+
+  # check tidak boleh mengganggu situs yang sedang jalan
+  start_jamu "$d/polos" 8108 "$log" || { cek "start polos" gagal ok; akhir_grup "$log"; return; }
+  periksa "$d/polos"
+  cek "saat situs jalan: check lulus" "$rc" 0 "$keluaran"
+  cek "saat situs jalan: situs tetap menjawab" "$(cu http://127.0.0.1:8108/)" polos
+  stop_jamu
+
+  # jamu.toml
+  printf '%s\n' '<?php' > "$d/toml/index.php"
+  printf '%s\n' 'prot = "8.4"' > "$d/toml/jamu.toml"
+  periksa "$d/toml"
+  cek "jamu.toml salah ketik: kode keluar 1" "$rc" 1 "$keluaran"
+  cek "jamu.toml salah ketik: kuncinya disebut" "$(has "$keluaran" prot)" yes "$keluaran"
+  printf '%s\n' 'php = "7.0"' > "$d/toml/jamu.toml"
+  periksa "$d/toml"
+  cek "versi PHP tidak cocok: kode keluar 1" "$rc" 1 "$keluaran"
+  cek "versi PHP tidak cocok: disebut" "$(has "$keluaran" 'meminta PHP 7.0')" yes "$keluaran"
+
+  # .htaccess yang menutup folder
+  printf '%s\n' '<?php' > "$d/wp/index.php"; printf '%s\n' '<?php' > "$d/wp/wp-load.php"
+  printf '%s\n' '<?php' > "$d/wp/wp-config.php"
+  printf '%s\n' '<FilesMatch "\.php$">' 'Deny from all' '</FilesMatch>' > "$d/wp/wp-content/uploads/gambar/.htaccess"
+  printf '%s\n' 'RewriteEngine On' 'RewriteRule . /index.php [L]' > "$d/wp/.htaccess"
+  periksa "$d/wp"
+  cek "larangan per berkas: bukan masalah" "$rc" 0 "$keluaran"
+  cek "larangan per berkas: dicatat" "$(has "$keluaran" 'wp-content/uploads/gambar/.htaccess baris 2')" yes "$keluaran"
+  cek "aturan tulis ulang: tidak disebut" "$(printf '%s\n' "$keluaran" | grep -c '  \.htaccess')" 0 "$keluaran"
+  printf '%s\n' '# dibuat plugin' '<IfModule mod_authz_core.c>' '  Require all denied' '</IfModule>' > "$d/wp/wp-content/uploads/pribadi/.htaccess"
+  periksa "$d/wp"
+  cek "folder ditutup .htaccess: kode keluar 1" "$rc" 1 "$keluaran"
+  cek "folder ditutup .htaccess: foldernya disebut" "$(has "$keluaran" 'MASALAH  wp-content/uploads/pribadi/.htaccess')" yes "$keluaran"
+  cek "folder ditutup .htaccess: jumlah masalah" "$(has "$keluaran" '1 masalah')" yes "$keluaran"
+
+  # Laravel
+  printf '%s\n' '<?php' > "$d/laravel/artisan"; printf '%s\n' '<?php' > "$d/laravel/public/index.php"
+  periksa "$d/laravel"
+  cek "laravel kosong: kode keluar 1" "$rc" 1 "$keluaran"
+  cek "laravel kosong: vendor disebut" "$(has "$keluaran" 'folder vendor belum ada')" yes "$keluaran"
+  cek "laravel kosong: APP_KEY disebut" "$(has "$keluaran" 'APP_KEY belum diisi')" yes "$keluaran"
+  mkdir -p "$d/laravel/vendor"; printf '%s\n' '<?php' > "$d/laravel/vendor/autoload.php"
+  printf '%s\n' 'APP_KEY=base64:abc' 'APP_DEBUG=true' > "$d/laravel/.env"
+  JAMU_COMPOSER="$d/tidak-ada.phar" periksa "$d/laravel"
+  cek "laravel dev dengan APP_DEBUG: bukan masalah" "$(has "$keluaran" APP_DEBUG)" no "$keluaran"
+  JAMU_COMPOSER="$d/tidak-ada.phar" periksa "$d/laravel" --behind-proxy
+  cek "laravel di server dengan APP_DEBUG: masalah" "$(has "$keluaran" 'MASALAH  APP_DEBUG')" yes "$keluaran"
+  APP_DEBUG=false JAMU_COMPOSER="$d/tidak-ada.phar" periksa "$d/laravel" --behind-proxy
+  cek "variabel lingkungan menang atas .env" "$(has "$keluaran" 'MASALAH  APP_DEBUG')" no "$keluaran"
+
+  # Mode domain: nama yang belum ada di DNS adalah masalah; nama yang aneh ditolak sebelum
+  # sempat ditulis ke konfigurasi.
+  periksa "$d/polos" --domain tidak-ada.invalid --domain www.tidak-ada.invalid
+  cek "domain tanpa DNS: kode keluar 1" "$rc" 1 "$keluaran"
+  cek "domain tanpa DNS: tiap nama disebut" "$(printf '%s\n' "$keluaran" | grep -c 'belum punya rekaman DNS')" 2 "$keluaran"
+  cek "domain tanpa DNS: konfigurasi dua nama diterima Caddy" "$(has "$keluaran" 'konfigurasi Caddy diterima')" yes "$keluaran"
+  gagal_start "domain berisi kurung" 'tulis nama domain' serve "$d/polos" --domain 'situs.com {'
+  gagal_start "domain berupa URL" 'tulis nama domain' serve "$d/polos" --domain https://situs.com
+  gagal_start "email berisi baris baru" '--email' serve "$d/polos" --domain situs.com --email "$(printf 'a@b.c\n}')"
+
+  # Caddy yang menolak konfigurasi: pesannya diteruskan
+  if [ "$windows" = 0 ]; then
+    printf '%s\n' '#!/bin/sh' 'echo "Error: adapting config: directive tidak dikenal" >&2' 'exit 1' > "$d/caddy-tolak"
+    chmod +x "$d/caddy-tolak"
+    JAMU_CADDY="$d/caddy-tolak" periksa "$d/polos"
+    cek "Caddy menolak: kode keluar 1" "$rc" 1 "$keluaran"
+    cek "Caddy menolak: pesannya diteruskan" "$(has "$keluaran" 'konfigurasi Caddy ditolak: Error: adapting config')" yes "$keluaran"
+  fi
+  akhir_grup "$log"
+}
+
+# GRUP="check toml" menjalankan sebagian saja; tanpa itu semuanya.
+for g in ${GRUP:-php check proxy toml wp_aturan laravel wp}; do "grup_$g"; done
 
 echo "$lulus lulus, $gagal gagal"
 # Folder kerja hanya berguna untuk memeriksa kegagalan; bila semua lulus, dibuang.
