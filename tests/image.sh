@@ -30,7 +30,8 @@ for _ in $(seq 60); do
 done
 [ "$(docker inspect "$name" --format '{{.State.Health.Status}}')" = healthy ] || fail "tidak pernah sehat"
 
-[[ $(docker exec "$name" jamu composer --version 2>&1) == Composer* ]] || fail "jamu composer tidak jalan"
+keluar=$(docker exec "$name" jamu composer --version 2>&1) || true
+[[ $keluar == Composer* ]] || fail "jamu composer tidak jalan: ${keluar:-(tanpa keluaran)}"
 [[ $(docker exec "$name" jamu php -r 'echo PHP_SAPI;' 2>&1) == cli ]] || fail "jamu php tidak jalan"
 # Composer harus bisa bekerja sebagai www-data, yang tidak punya folder rumah yang bisa ditulis.
 docker run --rm --entrypoint sh "$image" -c 'mkdir /tmp/p && cd /tmp/p \
