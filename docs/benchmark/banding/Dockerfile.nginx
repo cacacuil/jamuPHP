@@ -1,0 +1,12 @@
+# nginx + php-fpm dalam satu container. Dasarnya image jamuphp, jadi PHP, extension, dan
+# php.ini-nya persis sama; yang berbeda hanya server web dan siapa yang menjaga prosesnya.
+ARG DASAR
+FROM ${DASAR}
+USER root
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends nginx-light \
+ && rm -rf /var/lib/apt/lists/*
+USER www-data
+HEALTHCHECK NONE
+ENTRYPOINT ["/bin/sh", "/banding/mulai-nginx.sh"]
+CMD []

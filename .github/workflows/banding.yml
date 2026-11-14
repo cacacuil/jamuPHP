@@ -1,0 +1,24 @@
+name: banding
+# Pembanding performa terhadap FrankenPHP dan nginx + php-fpm. Lama dan tidak menguji
+# kebenaran, jadi hanya jalan bila diminta atau di branch `banding`.
+on:
+  workflow_dispatch:
+  push:
+    branches: [banding]
+
+jobs:
+  banding:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -q && sudo apt-get install -y -q wrk
+      - run: docker build -t jamuphp:8.4 .
+      - run: bash docs/benchmark/banding/banding.sh banding-hasil
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: banding-hasil
+          path: |
+            banding-hasil/*.txt
+            banding-hasil/*.md

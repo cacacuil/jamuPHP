@@ -1,0 +1,22 @@
+# Mode worker untuk Laravel: aplikasi dimuat sekali lalu melayani banyak permintaan.
+# Blok php_server sama dengan yang dibangkitkan Laravel Octane.
+{
+	frankenphp {
+		worker {
+			file /app/public/frankenphp-worker.php
+		}
+	}
+}
+http://:8080 {
+	log {
+		output stderr
+		format json
+	}
+	root * {$ROOT:/app}
+	encode zstd gzip
+	php_server {
+		index frankenphp-worker.php
+		try_files {path} frankenphp-worker.php
+		resolve_root_symlink
+	}
+}

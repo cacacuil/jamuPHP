@@ -1,0 +1,6 @@
+# FrankenPHP resmi, disiapkan seperti anjuran dokumentasinya untuk production:
+# opcache dipasang dan php.ini-production dipakai (sama dengan image jamuphp).
+ARG DASAR
+FROM ${DASAR}
+RUN install-php-extensions opcache \
+ && cp "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini"
