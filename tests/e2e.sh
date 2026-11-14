@@ -619,7 +619,8 @@ grup_wp() {
     cek "permintaan pertama dari PHP" "$(dari "$B/")" php
     f=""
     for _ in $(seq 1 10); do
-      f=$(find "$wp/wp-content/cache/supercache" -name index.html 2>/dev/null | head -1)
+      # Plugin juga menaruh index.html kosong di folder cache sebagai penutup daftar isi.
+      f=$(find "$wp/wp-content/cache/supercache" -name index.html -size +0 2>/dev/null | head -1)
       [ -n "$f" ] && break
       cu -o /dev/null "$B/"; sleep 0.5
     done
