@@ -71,7 +71,7 @@ akhiran() { case "$1" in *"$2") echo yes;; *) echo no;; esac; }
 # Jalankan jamu di latar belakang, tunggu baris "jamu: siap" (maks 40 detik).
 start_jamu() { # DIR PORT LOG [OPSI...]
   local dir=$1 port=$2 log=$3; shift 3
-  "$JAMU" serve "$dir" --port "$port" "$@" 2> "$log" &
+  "$JAMU" serve "$dir" --port "$port" "$@" < /dev/null > /dev/null 2> "$log" &
   JPID=$!
   for _ in $(seq 1 80); do
     grep -q 'jamu: siap' "$log" 2>/dev/null && return 0
@@ -79,7 +79,26 @@ start_jamu() { # DIR PORT LOG [OPSI...]
   done
   return 1
 }
-stop_jamu() { [ -n "$JPID" ] || return 0; kill "$JPID" 2>/dev/null; wait "$JPID" 2>/dev/null; JPID=""; }
+# Hentikan satu proses jamu. Di Git Bash, `kill` untuk program Windows asli juga mematikan
+# semua "keturunan" yang ia temukan lewat PID induk. PID di Windows dipakai ulang, jadi
+# proses yang tidak ada hubungannya bisa ikut mati, termasuk runner CI. Karena itu di
+# Windows jamu dimatikan lewat PID Windows-nya; anak-anaknya ikut mati lewat Job Object.
+matikan() { # PID versi bash
+  local w=""
+  [ "$windows" = 1 ] && w=$(cat "/proc/$1/winpid" 2>/dev/null)
+  case "$w" in
+    ''|*[!0-9]*)
+      [ "$windows" = 1 ] && echo "catatan: PID Windows tidak terbaca; memakai kill"
+      kill "$1" 2>/dev/null;;
+    *) if tasklist //FI "PID eq $w" //NH 2>/dev/null | grep -qi 'jamu'; then
+         taskkill //F //PID "$w" >/dev/null 2>&1
+       else
+         echo "catatan: PID Windows $w bukan jamu; memakai kill"
+         kill "$1" 2>/dev/null
+       fi;;
+  esac
+}
+stop_jamu() { [ -n "$JPID" ] || return 0; matikan "$JPID"; wait "$JPID" 2>/dev/null; JPID=""; }
 # Bila skrip ini berhenti di tengah jalan, jamu yang sedang diuji tidak boleh tertinggal.
 trap stop_jamu EXIT
 
@@ -272,7 +291,7 @@ EOF
     kill -0 "$p2" 2>/dev/null || { mati=yes; break; }
     sleep 0.5
   done
-  if [ "$mati" = yes ]; then wait "$p2"; rc=$?; else kill "$p2" 2>/dev/null; wait "$p2" 2>/dev/null; rc=0; fi
+  if [ "$mati" = yes ]; then wait "$p2"; rc=$?; else matikan "$p2"; wait "$p2" 2>/dev/null; rc=0; fi
   cek "port bentrok: keluar non-nol dalam 10 s" "$([ "$mati" = yes ] && [ "$rc" -ne 0 ] && echo yes || echo no)" yes
   cek "port bentrok: log menyebut 8101" "$(has "$(cat "$work/konflik.log")" 8101)" yes
   # 11. matikan worker PHP: layanan harus pulih
@@ -385,7 +404,10 @@ EOF
   cek "pekerja memakai [ini]" "$(has "$(head -1 "$site/pekerja.log")" Asia/Jakarta)" yes "$(head -1 "$site/pekerja.log")"
   # pekerja yang mati dinyalakan ulang
   pid=$(tail -1 "$site/pekerja.log" | cut -d' ' -f1)
-  if [ "$windows" = 1 ]; then taskkill //F //PID "$pid" > /dev/null; else kill -9 "$pid"; fi
+  case "$pid" in
+    ''|*[!0-9]*) cek "PID pekerja terbaca" "$pid" angka;;
+    *) if [ "$windows" = 1 ]; then taskkill //F //PID "$pid" > /dev/null; else kill -9 "$pid"; fi;;
+  esac
   baru=no
   for _ in $(seq 1 20); do
     n1=$(tail -1 "$site/pekerja.log" | cut -d' ' -f1)

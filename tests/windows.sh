@@ -21,7 +21,7 @@ memori() { # jumlah proses dan total memori (K) untuk satu nama
 }
 mulai() {
   local t0; t0=$(date +%s%N)
-  "$JAMU" serve "$site" --port 8111 2> "$log" &
+  "$JAMU" serve "$site" --port 8111 < /dev/null > /dev/null 2> "$log" &
   JPID=$!
   for _ in $(seq 1 200); do
     if grep -q 'jamu: siap' "$log" 2>/dev/null; then catat "siap dalam $(( ($(date +%s%N) - t0) / 1000000 )) ms"; return 0; fi
@@ -29,7 +29,12 @@ mulai() {
   done
   echo "GAGAL  jamu tidak siap dalam 40 detik"; gagal=$((gagal+1)); cat "$log"; return 1
 }
-berhenti() { kill "$JPID" 2>/dev/null; wait "$JPID" 2>/dev/null; }
+# Lewat PID Windows, bukan `kill` milik Git Bash: lihat catatan di tests/e2e.sh.
+berhenti() {
+  local w; w=$(cat "/proc/$JPID/winpid" 2>/dev/null)
+  case "$w" in ''|*[!0-9]*) kill "$JPID" 2>/dev/null;; *) taskkill //F //PID "$w" >/dev/null 2>&1;; esac
+  wait "$JPID" 2>/dev/null
+}
 
 # Situs berbentuk WordPress (ada wp-load.php), supaya aturan folder unggahan ikut aktif.
 site="$work/Situs Uji é"

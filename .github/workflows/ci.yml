@@ -90,6 +90,17 @@ jobs:
           ls dist/php | head -40
       - name: Siapkan Laravel dan WordPress
         run: JAMU=dist/jamu.exe bash tests/sites.sh sites
+      # Sementara: mencari sebab runner Windows sesekali hilang di tengah uji end-to-end.
+      - name: Diagnosa pohon proses
+        shell: pwsh
+        run: |
+          $all = Get-CimInstance Win32_Process
+          $nama = @{}
+          $all | ForEach-Object { $nama[[int]$_.ProcessId] = $_.Name }
+          $all | Sort-Object ProcessId | ForEach-Object {
+            $induk = if ($nama.ContainsKey([int]$_.ParentProcessId)) { $nama[[int]$_.ParentProcessId] } else { 'MATI' }
+            '{0,6} {1,6} {2,-32} induk={3}' -f $_.ProcessId, $_.ParentProcessId, $_.Name, $induk
+          }
       - name: Uji end-to-end (sama dengan Linux)
         run: |
           root=$(cygpath -m "$PWD")
