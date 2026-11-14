@@ -149,19 +149,31 @@ pub fn cgi_ini(bin: &Path, dev: bool) -> String {
     s
 }
 
-/// Content-Type untuk akhiran berkas yang tidak ada di tabel bawaan Caddy.
+/// Content-Type berkas statis menurut akhirannya, sama di semua OS.
 const MIME_TYPES: &[(&str, &str)] = &[
+    ("text/html; charset=utf-8", "html htm"),
+    ("text/css; charset=utf-8", "css"),
+    ("text/javascript; charset=utf-8", "js mjs"),
+    ("application/json", "json map"),
+    ("application/manifest+json", "webmanifest"),
+    ("text/xml; charset=utf-8", "xml"),
+    ("text/plain; charset=utf-8", "txt"),
+    ("text/csv; charset=utf-8", "csv"),
+    ("image/svg+xml", "svg"),
+    ("image/png", "png"),
+    ("image/jpeg", "jpg jpeg"),
+    ("image/gif", "gif"),
+    ("image/webp", "webp"),
+    ("image/avif", "avif"),
+    ("image/x-icon", "ico"),
+    ("image/bmp", "bmp"),
     ("font/woff2", "woff2"),
     ("font/woff", "woff"),
     ("font/ttf", "ttf"),
     ("font/otf", "otf"),
     ("application/vnd.ms-fontobject", "eot"),
-    ("image/x-icon", "ico"),
-    ("image/bmp", "bmp"),
-    ("text/plain; charset=utf-8", "txt"),
-    ("text/csv; charset=utf-8", "csv"),
-    ("application/manifest+json", "webmanifest"),
-    ("application/json", "map"),
+    ("application/pdf", "pdf"),
+    ("application/wasm", "wasm"),
     ("video/mp4", "mp4 m4v"),
     ("video/webm", "webm"),
     ("audio/mpeg", "mp3"),
@@ -225,27 +237,22 @@ pub fn caddyfile(p: &Project, o: &Opts, port: u16, state: &Path, php: &Php) -> S
     }
     s += &format!("\troot * {}\n", q(&p.root));
     s += "\trequest_body {\n\t\tmax_size 128MB\n\t}\n";
+    // Urutan penanganan ditulis terang-terangan di dalam `route`, tidak diserahkan ke urutan
+    // bawaan Caddy: tolak dulu, lalu PHP, lalu berkas statis.
+    let mut route = String::new();
     // Dotfile (.env, .git, .htaccess) tidak pernah disajikan, kecuali .well-known.
-    s += "\t@hidden {\n\t\tpath_regexp (^|/)\\.\n\t\tnot path /.well-known/*\n\t}\n\trespond @hidden 404\n";
+    s += "\t@hidden {\n\t\tpath_regexp (^|/)\\.\n\t\tnot path /.well-known/*\n\t}\n";
+    route += "\t\trespond @hidden 404\n";
     if p.kind == Kind::WordPress {
         // Windows mengabaikan titik dan spasi di ujung nama file, jadi `x.php.` adalah `x.php`.
         // Spasi ditulis \x20 karena spasi biasa memotong token di Caddyfile.
-        s += "\t@uploads_php path_regexp (?i)^/wp-content/uploads/.*\\.php[.\\x20]*(/|$)\n\trespond @uploads_php 403\n";
+        s += "\t@uploads_php path_regexp (?i)^/wp-content/uploads/.*\\.php[.\\x20]*(/|$)\n";
+        route += "\t\trespond @uploads_php 403\n";
     }
     if p.kind == Kind::Laravel {
         // Hanya public/index.php yang dijalankan. Berkas .php lain di public, misalnya yang
         // ditaruh penyusup, diteruskan ke Laravel seperti URL biasa dan berakhir 404.
         s += "\t@other_php {\n\t\tpath_regexp (?i)\\.php[.\\x20]*(/|$)\n\t\tnot path /index.php /index.php/*\n\t}\n\trewrite @other_php /index.php\n";
-    }
-    // Caddy menebak Content-Type dari tabel milik OS, yang isinya berbeda di tiap mesin dan
-    // kosong di image container. Jenis yang umum di situs web ditetapkan di sini, hanya bila
-    // jawaban belum membawa Content-Type, sehingga jawaban PHP tidak tersentuh.
-    for (i, (mime, exts)) in MIME_TYPES.iter().enumerate() {
-        let paths: Vec<String> = exts.split(' ').map(|e| format!("*.{e}")).collect();
-        s += &format!(
-            "\t@mime{i} path {}\n\theader @mime{i} ?Content-Type \"{mime}\"\n",
-            paths.join(" ")
-        );
     }
     let upstream = match php {
         Php::Fpm { sock, .. } => q(Path::new(&format!("unix/{}", sock.display()))),
@@ -254,33 +261,41 @@ pub fn caddyfile(p: &Project, o: &Opts, port: u16, state: &Path, php: &Php) -> S
     if let Php::Fpm { .. } = php {
         s += &format!("\t@ping {{\n\t\tpath {PING_PATH}\n\t\tremote_ip 127.0.0.1 ::1\n\t}}\n");
         // php-fpm mengenali ping dari SCRIPT_NAME; tanpa split_path Caddy mengirimnya kosong.
-        s += &format!(
-            "\treverse_proxy @ping {upstream} {{\n\t\ttransport fastcgi {{\n\t\t\tenv SCRIPT_NAME {PING_PATH}\n\t\t\tenv SCRIPT_FILENAME {PING_PATH}\n\t\t}}\n\t}}\n"
+        route += &format!(
+            "\t\treverse_proxy @ping {upstream} {{\n\t\t\ttransport fastcgi {{\n\t\t\t\tenv SCRIPT_NAME {PING_PATH}\n\t\t\t\tenv SCRIPT_FILENAME {PING_PATH}\n\t\t\t}}\n\t\t}}\n"
         );
     }
-    s += "\tencode zstd gzip\n";
     // flush_interval -1: keluaran PHP diteruskan saat itu juga, tidak ditampung dulu.
     // Tanpa ini respons yang dialirkan (SSE, unduhan yang dibangkitkan) baru tiba setelah selesai.
-    let mut opts = String::from("\t\tflush_interval -1\n");
+    let mut opts = String::from("\t\t\tflush_interval -1\n");
     if p.kind == Kind::Laravel {
         // Bawaan Caddy juga mencoba {path}/index.php, yang akan menjalankan index.php di subfolder.
-        opts += "\t\ttry_files {path} index.php\n";
+        opts += "\t\t\ttry_files {path} index.php\n";
     }
     if o.behind_proxy {
         // HTTPS berakhir di proxy. Tanpa HTTPS=on, WordPress mengira situsnya HTTP lalu
         // berputar-putar dalam redirect. Hanya dipercaya bila pengirimnya di jaringan privat.
         // REMOTE_ADDR diisi alamat pengunjung, bukan alamat proxy.
         s += "\t@fwd_https {\n\t\theader X-Forwarded-Proto https\n\t\tremote_ip private_ranges\n\t}\n";
-        s += &format!(
-            "\tphp_fastcgi @fwd_https {upstream} {{\n{opts}\t\tenv HTTPS on\n\t\tenv REMOTE_ADDR {{client_ip}}\n\t}}\n"
+        route += &format!(
+            "\t\tphp_fastcgi @fwd_https {upstream} {{\n{opts}\t\t\tenv HTTPS on\n\t\t\tenv REMOTE_ADDR {{client_ip}}\n\t\t}}\n"
         );
-        s += &format!(
-            "\tphp_fastcgi {upstream} {{\n{opts}\t\tenv REMOTE_ADDR {{client_ip}}\n\t}}\n"
+        route += &format!(
+            "\t\tphp_fastcgi {upstream} {{\n{opts}\t\t\tenv REMOTE_ADDR {{client_ip}}\n\t\t}}\n"
         );
     } else {
-        s += &format!("\tphp_fastcgi {upstream} {{\n{opts}\t}}\n");
+        route += &format!("\t\tphp_fastcgi {upstream} {{\n{opts}\t\t}}\n");
     }
-    s += "\tfile_server\n}\n";
+    // Yang sampai di sini bukan urusan PHP, jadi Content-Type di bawah hanya mengenai berkas
+    // statis. Caddy sendiri menebaknya dari tabel milik OS: di Windows tabel itu menyebut
+    // .mjs sebagai text/plain, dan di image container tabelnya kosong.
+    for (i, (mime, exts)) in MIME_TYPES.iter().enumerate() {
+        let paths: Vec<String> = exts.split(' ').map(|e| format!("*.{e}")).collect();
+        s += &format!("\t@mime{i} path {}\n", paths.join(" "));
+        route += &format!("\t\theader @mime{i} Content-Type \"{mime}\"\n");
+    }
+    route += "\t\tfile_server\n";
+    s += &format!("\tencode zstd gzip\n\troute {{\n{route}\t}}\n}}\n");
     s
 }
 
@@ -360,18 +375,20 @@ mod tests {
     }
 
     #[test]
-    fn caddyfile_menetapkan_jenis_isi_hanya_bila_belum_ada() {
+    fn caddyfile_menetapkan_jenis_isi_sesudah_php_sebelum_berkas_statis() {
         let dir = project(&["index.php"]);
         let o = Opts {
             dir: dir.clone(),
             ..Default::default()
         };
         let text = caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), &fpm());
-        assert!(text.contains("path *.woff2\n"));
-        assert!(text.contains("path *.mp4 *.m4v\n"));
-        assert!(text.contains("?Content-Type \"font/woff2\""));
-        // Tanpa tanda tanya, Content-Type dari PHP akan ditimpa atau digandakan.
-        assert!(!text.contains(" Content-Type \""));
+        assert!(text.contains("path *.js *.mjs\n"));
+        let at = |needle: &str| text.find(needle).expect(needle);
+        // Urutan di dalam route: tolak, PHP, jenis isi, berkas statis.
+        assert!(at("route {") < at("respond @hidden 404"));
+        assert!(at("respond @hidden 404") < at("php_fastcgi"));
+        assert!(at("php_fastcgi") < at("Content-Type \"text/javascript; charset=utf-8\""));
+        assert!(at("Content-Type \"application/gzip\"") < at("file_server"));
     }
 
     #[test]

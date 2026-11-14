@@ -203,6 +203,9 @@ EOF
   cek "jenis .webp" "$(jenis "$B/a.webp")" image/webp
   cek "jenis .ico" "$(has "$(jenis "$B/a.ico")" icon)" yes "$(jenis "$B/a.ico")"
   cek "jenis .wasm" "$(jenis "$B/a.wasm")" application/wasm
+  # Jenis isi di atas hanya untuk berkas statis: jawaban PHP membawa jenisnya sendiri.
+  cek "jawaban PHP untuk /tidak-ada.js tetap text/html" "$(jenis "$B/tidak-ada.js")" text/html
+  cek "jawaban PHP hanya punya satu Content-Type" "$(hdr "$B/tidak-ada.js" | grep -c '^content-type:')" 1
   local etag
   etag=$(cu -o /dev/null -D - "$B/gaya.css" | tr -d '\r' | grep -i '^etag:' | sed 's/^[^:]*: *//')
   cek "gaya.css punya ETag" "$([ -n "$etag" ] && echo yes || echo no)" yes
