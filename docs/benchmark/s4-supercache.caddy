@@ -1,12 +1,29 @@
 	# Kandidat aturan untuk jamu: berkas supercache disajikan Caddy tanpa menyentuh PHP.
 	# Syaratnya sama dengan aturan baku plugin: GET/HEAD, tanpa query, tanpa cookie
-	# pengguna yang dikenal, dan berkasnya ada.
+	# pengguna yang dikenal, dan berkasnya ada. Plugin menyimpan halaman HTTPS di berkas
+	# terpisah (index-https.html), jadi ada dua aturan. Ini bentuk untuk mode di belakang
+	# proxy; di mode --domain syarat HTTPS-nya `protocol https`.
+	@supercache_https {
+		method GET HEAD
+		expression {http.request.uri.query} == ""
+		not header_regexp Cookie (comment_author|wordpress_[a-f0-9]+|wp-postpass|wordpress_logged_in)
+		header X-Forwarded-Proto https
+		remote_ip private_ranges
+		file /wp-content/cache/supercache/{host}{path}index-https.html
+	}
 	@supercache {
 		method GET HEAD
 		expression {http.request.uri.query} == ""
 		not header_regexp Cookie (comment_author|wordpress_[a-f0-9]+|wp-postpass|wordpress_logged_in)
+		not {
+			header X-Forwarded-Proto https
+			remote_ip private_ranges
+		}
 		file /wp-content/cache/supercache/{host}{path}index.html
 	}
+	header @supercache_https Cache-Control "max-age=3, must-revalidate"
+	header @supercache_https Vary "Accept-Encoding, Cookie"
 	header @supercache Cache-Control "max-age=3, must-revalidate"
 	header @supercache Vary "Accept-Encoding, Cookie"
+	rewrite @supercache_https {file_match.relative}
 	rewrite @supercache {file_match.relative}
