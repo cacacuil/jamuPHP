@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
 # Menyiapkan situs uji untuk tests/e2e.sh: Laravel baru (SQLite) dan WordPress yang belum
-# dipasang (SQLite lewat drop-in). Butuh `php` di PATH dan akses internet.
-# Pemakaian: bash tests/sites.sh [FOLDER]   (bawaan: sites)
+# dipasang (SQLite lewat drop-in). Butuh akses internet.
+# Pemakaian: [JAMU=path/ke/jamu] bash tests/sites.sh [FOLDER]   (bawaan: sites)
+#
+# Laravel dibuat lewat `jamu composer` dan `jamu php`: jalur yang sama dengan yang dipakai
+# pengguna, tanpa php.ini atau PATH yang disiapkan tangan.
 set -euo pipefail
 sites=${1:-sites}
+JAMU="${JAMU:-./target/release/jamu}"
+JAMU="$(cd "$(dirname "$JAMU")" && pwd)/$(basename "$JAMU")"
 # Unduhan di dalam folder tujuan, dengan path relatif: aman juga untuk PHP di Git Bash.
 unduh=$sites/.unduh
 mkdir -p "$unduh"
 
-curl -fsSL -o "$unduh"/composer.phar https://getcomposer.org/download/latest-stable/composer.phar
-php "$unduh"/composer.phar create-project laravel/laravel "$sites"/laravel --no-interaction --prefer-dist --quiet
+"$JAMU" composer create-project laravel/laravel "$sites"/laravel --no-interaction --prefer-dist --quiet
 cat >> "$sites"/laravel/routes/web.php <<'EOF'
 Route::get('/uji-db', fn () => ['pengguna' => \Illuminate\Support\Facades\DB::table('users')->count()]);
 Route::get('/uji-sesi', function () { session(['n' => session('n', 0) + 1]); return ['n' => session('n')]; });
 EOF
-(cd "$sites"/laravel && php artisan --version && php artisan migrate --force)
+(cd "$sites"/laravel && "$JAMU" php artisan --version && "$JAMU" php artisan migrate --force)
 
 curl -fsSL -o "$unduh"/wp.zip https://wordpress.org/latest.zip
 unzip -q "$unduh"/wp.zip -d "$sites"
@@ -48,5 +52,5 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 require_once ABSPATH . 'wp-settings.php';
 EOF
-rm -f "$unduh"/composer.phar "$unduh"/wp.zip "$unduh"/sqlite.zip
+rm -f "$unduh"/wp.zip "$unduh"/sqlite.zip
 rmdir "$unduh"

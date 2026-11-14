@@ -29,6 +29,14 @@ for _ in $(seq 60); do
 done
 [ "$(docker inspect "$name" --format '{{.State.Health.Status}}')" = healthy ] || fail "tidak pernah sehat"
 
+[[ $(docker exec "$name" jamu composer --version 2>&1) == Composer* ]] || fail "jamu composer tidak jalan"
+[[ $(docker exec "$name" jamu php -r 'echo PHP_SAPI;' 2>&1) == cli ]] || fail "jamu php tidak jalan"
+# Composer harus bisa bekerja sebagai www-data, yang tidak punya folder rumah yang bisa ditulis.
+docker run --rm --entrypoint sh "$image" -c 'mkdir /tmp/p && cd /tmp/p \
+  && jamu composer init --name=uji/uji --no-interaction >/dev/null 2>&1 \
+  && jamu composer dump-autoload >/dev/null 2>&1 && test -f vendor/autoload.php' \
+  || fail "jamu composer tidak bisa menulis vendor/ sebagai www-data"
+
 body=$(get "$url/")
 [[ $body == https=tidak* ]] || fail "halaman utama: $body"
 [[ $body == *" uid=0 "* ]] && fail "PHP berjalan sebagai root"

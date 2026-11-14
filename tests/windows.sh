@@ -39,6 +39,7 @@ echo "<?php /* RAHASIA-SUMBER */ echo 'halo';" > "$site/index.php"
 echo "<?php /* RAHASIA-SUMBER */ echo 'konfig';" > "$site/konfigurasi-rahasia.php"
 echo 'KUNCI=RAHASIA-ENV' > "$site/.env"
 echo 'RAHASIA-GIT' > "$site/.git/config"
+echo '# RAHASIA-TOML' > "$site/jamu.toml"
 echo "<?php /* RAHASIA-SUMBER */ echo 'DIEKSEKUSI';" > "$site/wp-content/uploads/x.php"
 echo "<?php file_put_contents(__DIR__ . '/pid.log', getmypid() . \"\\n\", FILE_APPEND | LOCK_EX); echo 'ok';" > "$site/pid.php"
 echo "<?php usleep(700000); echo 'selesai';" > "$site/lambat.php"
@@ -73,7 +74,8 @@ echo "== sumber PHP dan dotfile tidak boleh bocor =="
 # Nama pendek ala DOS (8.3): file `.env` bisa punya nama kedua seperti ENV~1.
 pendek() { (cd "$site" && powershell -NoProfile -Command "(New-Object -ComObject Scripting.FileSystemObject).$1('$2').ShortName" | tr -d '\r'); }
 env83=$(pendek GetFile .env); git83=$(pendek GetFolder .git); konf83=$(pendek GetFile konfigurasi-rahasia.php)
-catat "nama pendek: .env=$env83 .git=$git83 konfigurasi-rahasia.php=$konf83"
+toml83=$(pendek GetFile jamu.toml)
+catat "nama pendek: .env=$env83 .git=$git83 konfigurasi-rahasia.php=$konf83 jamu.toml=$toml83"
 aman() { # URL: isi jawaban tidak boleh memuat sumber atau rahasia, dan PHP di uploads tidak boleh jalan
   local kode isi
   kode=$(cu --path-as-is -o "$work/isi.txt" -w '%{http_code}' "$B$1")
@@ -88,6 +90,7 @@ for u in /INDEX.PHP /index.pHp /index.php. /index.php.. /index.php%20 '/index.ph
   '/index.php:$DATA' '/index.php%3a%3a$DATA' '/wp-load.php::$DATA' "/$konf83" '/KONFIG~1.PHP' \
   /.env /.ENV /.env. /.env%20 '/.env::$DATA' "/$env83" '/ENV~1' \
   /.git/config /.GIT/config "/$git83/config" '/GIT~1/config' \
+  /jamu.toml /JAMU.TOML /jamu.toml. /jamu.toml%20 '/jamu.toml::$DATA' "/$toml83" '/JAMU~1.TOM' \
   /wp-content/uploads/x.php /wp-content/uploads/X.PHP /wp-content/uploads/x.php. /wp-content/uploads/x.php%20 \
   '/wp-content/uploads/x.php::$DATA' /wp-content/uploads/x.php/y /WP-CONTENT/UPLOADS/x.php; do
   aman "$u"

@@ -3,9 +3,9 @@
 Paket server PHP untuk development dan production: satu perintah mengenali project,
 lalu menyalakan dan mengawasi Caddy dan php-fpm. Tanpa file konfigurasi.
 
-Status: spike S1 sampai S4. Kode ini sekali buang. Berjalan di Linux (php-fpm) dan
-Windows (php-cgi dari zip resmi PHP). Rencana lengkap, hasil pengukuran, dan hasil uji ada
-di [docs/HANDOFF.md](docs/HANDOFF.md).
+Status: fase 1 (core headless) sedang dikerjakan, belum untuk dipakai pelanggan. Berjalan
+di Linux (php-fpm) dan Windows (php-cgi dari zip resmi PHP). Rencana lengkap, hasil
+pengukuran, dan hasil uji ada di [docs/HANDOFF.md](docs/HANDOFF.md).
 
 ## Mencoba
 
@@ -29,10 +29,41 @@ Production, dengan sertifikat yang diterbitkan dan diperbarui otomatis:
 
 Bila `caddy` atau `php-fpm` tidak ada di `PATH`, tunjuk lewat `JAMU_CADDY` dan `JAMU_PHP_FPM`.
 
+PHP dan Composer untuk project ini, yaitu PHP yang sama dengan yang melayani situsnya:
+
+```bash
+jamu php artisan migrate
+```
+
+```bash
+jamu composer install
+```
+
+## jamu.toml
+
+Tidak wajib. Tanpa file ini `jamu` mengenali sendiri jenis project dan document root-nya.
+Taruh `jamu.toml` di folder project hanya bila ada yang perlu ditimpa:
+
+```toml
+php  = "8.4"            # tolak jalan dengan versi PHP lain
+root = "public"         # document root
+scheduler = true        # penjadwal Laravel; bawaan: menyala kecuali di mode dev
+
+[ini]
+memory_limit = "512M"
+
+[[worker]]
+name = "queue"
+run  = "php artisan queue:work --tries=3"
+```
+
+Pekerja dinyalakan bersama situs, diawasi, dan dinyalakan ulang bila mati. Untuk Laravel,
+`schedule:run` dijalankan tiap menit tanpa cron. Kunci yang tidak dikenal ditolak.
+
 ## Windows
 
-Tidak ada yang perlu dipasang. Satu folder berisi `jamu.exe`, `caddy.exe`, dan folder `php`
-(isi zip NTS resmi dari windows.php.net) sudah cukup:
+Tidak ada yang perlu dipasang. Satu folder berisi `jamu.exe`, `caddy.exe`, `composer.phar`,
+dan folder `php` (isi zip NTS resmi dari windows.php.net) sudah cukup:
 
 ```
 jamu.exe serve C:\path\ke\project
@@ -60,6 +91,7 @@ Untuk project Laravel atau PHP biasa, `Dockerfile` project cukup berisi:
 ```dockerfile
 FROM ghcr.io/cacacuil/jamuphp:8.4
 COPY --chown=www-data:www-data . /app
+RUN jamu composer install --no-dev --optimize-autoloader
 ```
 
 Image diterbitkan CI ke GHCR dari branch `main`, setelah lulus uji asap. Di Dokploy,

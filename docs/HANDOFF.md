@@ -1,6 +1,6 @@
 # JamuPHP: handoff v2
 
-Tanggal: 14 November 2026, revisi 10. Menggantikan handoff v1 ("XAMPP berbasis Rust").
+Tanggal: 14 November 2026, revisi 11. Menggantikan handoff v1 ("XAMPP berbasis Rust").
 Nama produk: JamuPHP. Perintahnya `jamu`, file config-nya `jamu.toml`. Repositori:
 https://github.com/cacacuil/jamuphp (lisensi AGPL-3.0).
 
@@ -29,6 +29,10 @@ Perubahan di revisi 10: spike S4 dikerjakan (bagian 19): pengukuran diulang tiga
 dengan MariaDB dan WP Super Cache di image `jamuphp`. Cache halaman tingkat platform
 (jalur negatif H7) diganti rekomendasi yang lebih kecil: aturan Caddy yang menyajikan
 berkas cache buatan plugin.
+Perubahan di revisi 11: owner menyetujui aturan berkas cache masuk fase 2. Fase 1 dimulai
+(bagian 20): `jamu.toml`, pekerja, penjadwal Laravel, `jamu php` dan `jamu composer`, serta
+tes daftar wajib bagian 8 yang berjalan sama di Linux dan Windows. Lingkup fase 1 dipotong
+ulang mengikuti keputusan Caddy (bagian 10). Contoh `jamu.toml` di bagian 6 dikoreksi.
 
 ## 1. Inti dalam satu menit
 
@@ -68,6 +72,7 @@ yang dikelola supervisor".
 | Nama | JamuPHP. |
 | Lisensi | AGPL-3.0 (dipilih owner saat membuat repositori). |
 | Registry image | GHCR: `ghcr.io/cacacuil/jamuphp`. |
+| Cache halaman | Tidak ada cache buatan platform. Di fase 2 `jamu` menulis aturan Caddy yang menyajikan berkas cache buatan plugin, hanya bila berkas plugin itu ada (bagian 19). |
 | WordPress | Tidak ikut di image dasar. Image dasar hanya PHP, Caddy, dan `jamu`; WordPress sejauh ini hanya dipakai untuk pengujian. |
 
 ### Rekomendasi yang menunggu persetujuan owner
@@ -544,16 +549,22 @@ Kode deteksi ini sama di laptop dan di container, sehingga hasilnya sama di kedu
 
 ```toml
 # Semua baris opsional. File ini boleh tidak ada.
-php  = "8.2"
+php  = "8.4"
 root = "public"
+scheduler = true
 
-[php.ini]
-memory_limit = "256M"
+[ini]
+memory_limit = "512M"
+"date.timezone" = "Asia/Jakarta"
 
 [[worker]]
 name = "queue"
 run  = "php artisan queue:work --tries=3"
 ```
+
+Contoh di revisi sebelumnya memakai `php = "8.2"` bersama tabel `[php.ini]`. Itu bukan TOML
+yang sah: `php` tidak bisa sekaligus teks dan tabel. Tabelnya bernama `[ini]`. Arti tiap
+kunci, dan apa yang ditolak, ada di bagian 20.
 
 Yang berbeda antar lingkungan (kredensial database, tujuan mail, domain) datang dari
 environment variable, tidak pernah dari file ini. Nilai bawaan PHP (batas memori, ukuran
@@ -784,18 +795,28 @@ Ukuran: K kecil, S sedang, B besar. Ini perkiraan kasar, bukan janji waktu.
 - Lulus bila keempatnya jalan. Bila S2 macet di Windows, evaluasi nginx untuk Windows atau
   FrankenPHP sebagai lapisan web desktop.
 
-**Fase 1, core headless (B).** Deteksi project, perintah `serve`, `.htaccess` tahap 1,
-pengelolaan pool PHP, worker, penjadwal, log, shutdown yang rapi, penerus `php` dan
-`composer` yang memilih versi sesuai project. Termasuk tiga hal kecil yang mahal bila
-disusulkan: extension `redis` di paket PHP, pencocokan host dengan wildcard, dan jenis
-upstream reverse proxy HTTP. Aturan multisite WordPress masuk korpus uji.
-- Lulus bila `laravel new` lalu `serve` jalan tanpa file config di Linux dan Windows, tes
-  bagian 8 hijau di kedua OS, dan uji diferensial tahap 1 tanpa selisih.
+**Fase 1, core headless (B).** Deteksi project, perintah `serve`, `jamu.toml`, pekerja,
+penjadwal, log, shutdown yang rapi, penerus `php` dan `composer`. Sedang dikerjakan;
+keadaannya di bagian 20.
+- Lulus bila `composer create-project laravel/laravel` lalu `serve` jalan tanpa file config
+  di Linux dan Windows, dan tes bagian 8 hijau di kedua OS.
 
-**Fase 2, production (S).** Dua mode: server mandiri dengan SSL sah bawaan lewat mod_md
-(tambah domain, pemeriksaan DNS, reload saat `renewed`, status sertifikat), dan container
-di belakang Traefik. Lalu healthcheck, kepercayaan proxy, mail mode teruskan, wp-cron, log
-JSON, non-root, perintah `check`. Uji SSL terhadap staging Let's Encrypt dengan domain
+Rumusan awal fase ini ditulis sebelum keputusan Caddy. Yang berubah:
+
+| Butir rumusan awal | Sekarang | Alasan |
+|---|---|---|
+| `.htaccess` tahap 1 dan uji diferensial terhadap Apache | Dicoret dari fase 1 | Owner menunda `.htaccess`; tanpa itu tidak ada yang dibandingkan dengan Apache. |
+| Pengelolaan pool PHP | Tidak dibangun | php-fpm dan `php-cgi` sudah mengurus pekerjanya sendiri (bagian 18). |
+| Pencocokan host dengan wildcard, upstream reverse proxy HTTP | Tidak dibangun | Keduanya kemampuan bawaan Caddy. Baru disentuh saat ada fitur yang memakainya. |
+| Extension `redis` | Sudah ada di image (bagian 17) | Untuk rakitan Windows menunggu fase 3; zip resmi PHP tidak membawanya. |
+| Aturan multisite WordPress di korpus uji | Pindah ke fase 2 | Satu kelompok dengan pekerjaan WordPress production lain: wp-cron dan aturan berkas cache. |
+| Penerus `php` dan `composer` yang memilih versi | Penerus sudah ada; memilih versi menunggu fase 3 | Baru bermakna bila ada lebih dari satu versi PHP terpasang, dan itu pekerjaan "unduh dan ganti versi PHP". Sampai saat itu `php = "8.4"` adalah janji yang diperiksa, bukan pemilih. |
+
+**Fase 2, production (S).** Dua mode: server mandiri dengan SSL sah bawaan Caddy (tambah
+domain, pemeriksaan DNS, status sertifikat), dan container di belakang Traefik. Lalu mail
+mode teruskan, wp-cron, aturan multisite WordPress, aturan berkas cache buatan plugin
+(bagian 19), log akses, log JSON, perintah `check`. Healthcheck, kepercayaan proxy, dan
+non-root sudah ada sejak S3. Uji SSL terhadap staging Let's Encrypt dengan domain
 sungguhan sebelum dipakai pelanggan.
 - Urutan pemakaian: situs internal, lalu beberapa pelanggan, lalu bawaan.
 - Lulus bila sejumlah situs berjalan 30 hari tanpa insiden yang disebabkan runtime.
@@ -1416,7 +1437,110 @@ Keempat spike sudah dikerjakan. Yang masih terbuka sebelum fase 1:
 1. Owner mencoba rakitan Windows di Windows 10 atau 11 (bagian 18).
 2. Deploy satu situs di Dokploy dari image GHCR, dan uji `--domain` terhadap staging
    Let's Encrypt dengan domain sungguhan (sisa S3 dan S1).
-3. Owner memutuskan soal aturan berkas cache di atas.
+3. Owner memutuskan soal aturan berkas cache di atas. Sudah: disetujui, masuk fase 2.
+
+## 20. Fase 1: core headless (sedang berjalan)
+
+Kode spike tidak dibuang; ia dirapikan menjadi dasar fase 1. Dikerjakan di branch `fase-1`.
+`main` belum disentuh, supaya image `:8.4` di GHCR tidak berubah sebelum owner memintanya.
+
+### Yang dibuat
+
+- **Kode dipecah menjadi modul**, tanpa mengubah perilaku: `detect` (mengenali project),
+  `settings` (`jamu.toml`), `config` (Caddyfile dan konfigurasi PHP), `serve`, `supervise`,
+  `cli` (`jamu php`, `jamu composer`), `paths`, dan dua berkas khusus OS.
+- **Tes daftar wajib bagian 8** ada di `tests/e2e.sh`: satu skrip, dijalankan terhadap
+  php-fpm di Linux dan `php-cgi` di Windows. Situs ujinya (Laravel baru dan WordPress
+  dengan SQLite) dibuat `tests/sites.sh`. CI mendapat job `linux`, sehingga jalur
+  developer Linux (paket distro, bukan image) ikut teruji di setiap push.
+- **`jamu.toml`**, opsional. Lima kunci, tidak lebih:
+
+  | Kunci | Arti | Yang ditolak |
+  |---|---|---|
+  | `php = "8.4"` | Janji: project ini hanya dijalankan PHP 8.4.x. `serve` dan `jamu php` menolak versi lain dengan satu kalimat. | Selain dua angka, misalnya `"8"` atau `"^8.2"`. |
+  | `root = "web"` | Document root, menimpa hasil deteksi. | Yang bukan folder, atau yang keluar dari folder project. |
+  | `scheduler = true` | Menyalakan atau mematikan penjadwal Laravel. | Selain `true` dan `false`. |
+  | `[ini]` | Pengaturan php.ini untuk project ini. Berlaku untuk web, pekerja, penjadwal, dan `jamu php`. | Nama di luar huruf, angka, titik, garis bawah; nilai lebih dari satu baris. |
+  | `[[worker]]` dengan `name` dan `run` | Proses latar yang ikut dinyalakan. | Nama ganda, nama yang dipakai `jamu` sendiri (`caddy`, `php-fpm`, `schedule`, ...), `run` kosong. |
+
+  Kunci yang tidak dikenal ditolak, supaya salah ketik (`rot = "public"`) tidak diam-diam
+  diabaikan. Semua penolakan terjadi sebelum ada proses yang dinyalakan.
+- **Pekerja.** `run` dijalankan lewat shell (`sh -c`, di Windows `cmd /C`) di folder
+  project. `php` di dalamnya adalah PHP yang melayani situs, dengan `[ini]` yang sama.
+  Pekerja yang mati dinyalakan ulang dengan jeda yang bertambah (1 sampai 30 detik), sama
+  seperti Caddy dan PHP. Pekerja tidak menahan situs: situs dianggap siap begitu Caddy dan
+  PHP hidup, dan pekerja yang gagal dinyalakan tidak menjatuhkan situsnya. Saat berhenti,
+  pekerja diberi tahu paling awal dan ditunggu paling akhir (9 detik), supaya
+  `queue:work` sempat menyelesaikan tugas yang sedang dikerjakan.
+- **Penjadwal Laravel.** `php artisan schedule:run` dijalankan tiap pergantian menit,
+  seperti cron. Menyala dengan sendirinya di `--domain` dan `--behind-proxy`; mati di mode
+  dev, kecuali `scheduler = true`. Hanya untuk Laravel. wp-cron menunggu fase 2.
+- **`jamu php` dan `jamu composer`.** Dijalankan dari folder project. Keduanya memakai PHP
+  yang sama dengan `serve`, dengan `[ini]` dan pemeriksaan versi yang sama, dan meneruskan
+  kode keluar. Di Windows ini yang membuat `php` punya ekstensi dan daftar CA tanpa
+  php.ini yang ditulis tangan. Composer dicari di samping `jamu` (`composer.phar`), lalu
+  di `PATH`. Composer ikut di image dan di rakitan Windows.
+- **Catatan galat PHP sampai ke log `jamu`** di kedua jalur, dengan awalan `[php-fpm]`
+  atau `[php-cgi]`.
+
+### Temuan dari tes bagian 8
+
+Enam hal yang salah dan tidak akan terlihat tanpa tes itu:
+
+1. **`X-Forwarded-For` bisa dipalsukan.** Di mode `--behind-proxy`, Caddy mengambil alamat
+   paling kiri dari header itu, yaitu alamat yang ditulis pengunjung sendiri. Pembatas
+   laju dan log di aplikasi jadi bisa dikelabui. Diperbaiki dengan
+   `trusted_proxies_strict`: alamat diambil dari kanan, dari proxy yang dipercaya.
+2. **Laravel menjalankan berkas `.php` apa pun di `public/`.** Berkas yang ditaruh
+   penyusup lewat celah unggah langsung bisa dieksekusi. Sekarang hanya `index.php` yang
+   dijalankan; permintaan ke berkas `.php` lain diteruskan ke Laravel dan berakhir 404.
+3. **Jenis isi berkas statis bergantung OS.** Caddy menanyakannya ke sistem operasi.
+   Windows menjawab `text/plain` untuk `.mjs`, sehingga browser menolak modul JavaScript;
+   di image container tabelnya kosong. `jamu` kini menetapkan sendiri jenis isi 31 akhiran
+   yang umum, sama di semua OS. Jawaban dari PHP tidak disentuh.
+4. **`error_log()` di jalur `php-cgi` tidak terlihat.** Catatannya dikirim lewat FastCGI
+   dan dibuang Caddy. Sekarang ditangkap dan ditampilkan.
+5. **`jamu.toml` ikut tersaji** bila document root adalah folder project itu sendiri
+   (WordPress, PHP biasa). Sekarang selalu 404, termasuk varian huruf besar dan titik atau
+   spasi di ujung nama.
+6. **Header `Proxy` (httpoxy)** ternyata sudah dibuang Caddy. Tidak ada yang perlu
+   diperbaiki; tesnya tetap ada supaya tidak diam-diam berubah.
+
+### Hal yang perlu diketahui sebelum memakainya
+
+- **Penjadwal dan lebih dari satu replika.** Bila satu situs dijalankan di dua container,
+  keduanya menjalankan `schedule:run`. Matikan di semua kecuali satu
+  (`scheduler = false`), atau pakai `onOneServer()` milik Laravel. Ini keputusan bawaan
+  yang bisa dibalik: menyala di production berarti situs Laravel yang baru di-deploy
+  langsung punya penjadwal tanpa cron, dengan harga kejutan ini pada pemasangan
+  berreplika.
+- **Tugas terjadwal tidak saling menunggu.** Sama seperti cron: bila yang sebelumnya
+  belum selesai, yang berikutnya tetap dijalankan. Pencegahnya `withoutOverlapping()`.
+- **Batas untuk web tidak berlaku di baris perintah.** `memory_limit` 256M dan batas
+  unggahan adalah bawaan untuk web. Pekerja, penjadwal, dan Composer hanya menerima
+  `[ini]`, karena kebutuhan mereka lain (Composer sering butuh memori lebih).
+- **Perubahan `jamu.toml` baru berlaku setelah `serve` dinyalakan ulang.**
+
+### Hasil uji
+
+`tests/e2e.sh` berisi 148 pemeriksaan. Di CI semuanya lulus di Linux (php-fpm 8.3 dari paket
+distro) dan di Windows dengan PHP 8.4 dan 8.5 (147 pemeriksaan; satu yang dilewati diuji
+`tests/windows.sh` dengan cara Windows). Uji khusus Windows dan uji asap image juga lulus.
+Situs Laravel yang diuji dibuat CI lewat `jamu composer create-project` lalu
+`jamu php artisan migrate`, tanpa file config dan tanpa php.ini yang ditulis tangan. Itu
+syarat lulus fase 1 yang pertama.
+
+Kinerja di Windows tidak berubah dibanding S2: siap dalam 0,8 detik, 6000 permintaan
+dalam 3,7 detik.
+
+### Yang belum
+
+- Log akses. Saat ini hanya galat yang tercatat.
+- Pemilihan versi PHP (lebih dari satu versi terpasang, unduh otomatis): fase 3.
+- `redis` di rakitan Windows: fase 3.
+- wp-cron, aturan multisite, aturan berkas cache: fase 2.
+- Uji `--domain` dengan domain sungguhan dan deploy di Dokploy dari image GHCR masih sisa
+  S1 dan S3, dan tetap perlu dilakukan owner.
 
 ## Sumber
 

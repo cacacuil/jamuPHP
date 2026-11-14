@@ -69,7 +69,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: cargo test --locked
       - run: cargo build --release --locked
-      - name: Rakit jamu, Caddy, dan PHP dalam satu folder
+      - name: Rakit jamu, Caddy, PHP, dan Composer dalam satu folder
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -81,19 +81,12 @@ jobs:
           curl -fsSL -o unduh/php.zip "https://downloads.php.net/~windows/releases/latest/$zip" \
             || curl -fsSL -o unduh/php.zip "https://windows.php.net/downloads/releases/latest/$zip"
           unzip -q unduh/php.zip -d dist/php
+          curl -fsSL -o dist/composer.phar https://getcomposer.org/download/latest-stable/composer.phar
           dist/caddy.exe version
           dist/php/php-cgi.exe -v
           ls dist/php | head -40
       - name: Siapkan Laravel dan WordPress
-        run: |
-          root=$(cygpath -m "$PWD")
-          # php.ini ini hanya untuk composer dan artisan di langkah ini. jamu tidak memakainya:
-          # ia menulis php.ini sendiri dan menunjuknya dengan -c.
-          mkdir -p unduh/ini
-          printf 'extension_dir = "%s/dist/php/ext"\n' "$root" > unduh/ini/php.ini
-          for e in curl fileinfo mbstring openssl pdo_sqlite sqlite3 zip; do echo "extension = $e" >> unduh/ini/php.ini; done
-          export PHPRC="$root/unduh/ini" PATH="$PWD/dist/php:$PATH"
-          bash tests/sites.sh sites
+        run: JAMU=dist/jamu.exe bash tests/sites.sh sites
       - name: Uji end-to-end (sama dengan Linux)
         run: |
           root=$(cygpath -m "$PWD")

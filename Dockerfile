@@ -15,6 +15,7 @@ COPY src ./src
 RUN cargo build --release --locked
 
 FROM caddy:2 AS caddy
+FROM composer:2 AS composer
 
 FROM php:${PHP_VERSION}-fpm
 # Satu set tetap yang menutup kebutuhan WordPress dan Laravel. Bawaan image resmi sudah
@@ -24,6 +25,8 @@ COPY --from=mlocati/php-extension-installer /usr/bin/install-php-extensions /usr
 RUN install-php-extensions ${PHP_EXTENSIONS} \
  && cp "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini"
 COPY --from=caddy /usr/bin/caddy /usr/local/bin/caddy
+# Untuk `RUN jamu composer install` di Dockerfile project, tanpa tahap build terpisah.
+COPY --from=composer /usr/bin/composer /usr/local/bin/composer
 COPY --from=build /src/target/release/jamu /usr/local/bin/jamu
 
 # Menautkan image di GHCR ke repositori sumbernya.
