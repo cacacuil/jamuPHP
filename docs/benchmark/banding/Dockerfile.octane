@@ -6,7 +6,8 @@ FROM ${DASAR}
 ARG MESIN
 USER root
 COPY --from=rr /usr/bin/rr /usr/local/bin/rr
-RUN if [ "$MESIN" = swoole ]; then install-php-extensions swoole; fi
+# Swoole adalah extension PHP; RoadRunner adalah program terpisah yang butuh extension sockets.
+RUN if [ "$MESIN" = swoole ]; then install-php-extensions swoole; else install-php-extensions sockets; fi
 USER www-data
 ENV MESIN=${MESIN}
 HEALTHCHECK NONE

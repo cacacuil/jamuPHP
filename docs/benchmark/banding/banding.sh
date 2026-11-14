@@ -76,7 +76,10 @@ PHP
   { echo '<!doctype html><title>statis</title>'; head -c 6960 /dev/zero | tr '\0' 'x'; } > "$apps/halo/statis.html"
 
   di_image . composer create-project laravel/laravel laravel --no-interaction --prefer-dist --no-progress
-  di_image laravel composer require laravel/octane spiral/roadrunner-http spiral/roadrunner-cli --no-interaction --no-progress
+  # Paket RoadRunner meminta extension sockets, yang tidak ada di image jamuphp; image
+  # Octane RoadRunner memasangnya sendiri (Dockerfile.octane).
+  di_image laravel composer require laravel/octane spiral/roadrunner-http spiral/roadrunner-cli \
+    --ignore-platform-req=ext-sockets --no-interaction --no-progress
   # Meniru extension yang crash di dalam aplikasi: proses PHP yang melayani permintaan ini mati.
   cat >> "$apps/laravel/routes/web.php" <<'PHP'
 Route::get('/mati', function () { posix_kill(posix_getpid(), 11); return 'masih hidup'; });
