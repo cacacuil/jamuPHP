@@ -132,7 +132,9 @@ grup_php() {
 <?php $f = $_FILES['berkas'] ?? null; if (!$f || $f['error']) { http_response_code(400); exit('gagal'); } echo $f['size'], ' ', hash_file('sha256', $f['tmp_name']);
 EOF
   cat > "$htd/alir.php" <<'EOF'
-<?php header('Content-Type: text/plain'); for ($i = 1; $i <= 4; $i++) { echo "potongan $i\n"; @ob_flush(); flush(); usleep(500000); }
+<?php header('Content-Type: ' . (isset($_GET['sse']) ? 'text/event-stream' : 'text/plain'));
+$isi = isset($_GET['besar']) ? str_repeat(' isi', 600) : '';
+for ($i = 1; $i <= 4; $i++) { echo "potongan $i$isi\n"; @ob_flush(); flush(); usleep(500000); }
 EOF
   printf '%s\n' '<?php error_log("JEJAK-LOG-E2E"); echo "ok";' > "$htd/catat.php"
   cat > "$htd/lambat.php" <<'EOF'
@@ -255,6 +257,16 @@ EOF
   ttfb=${t% *}; total=${t#* }
   cek "stream: ttfb < 1 s" "$(awk -v a="$ttfb" 'BEGIN{print (a<1.0)?"yes":"no"}')" yes "ttfb=${ttfb}s"
   cek "stream: total > 1.5 s" "$(awk -v a="$total" 'BEGIN{print (a>1.5)?"yes":"no"}')" yes "total=${total}s"
+  # Sama untuk jawaban yang dimampatkan dan untuk SSE: sesudah satu detik potongan pertama
+  # sudah di tangan klien dan potongan terakhir belum ditulis.
+  local sebagian
+  cek "stream dimampatkan: gzip" "$(hdr -H 'Accept-Encoding: gzip' "$B/alir.php?besar" | grep -c '^content-encoding: gzip')" 1
+  sebagian=$(cu --compressed --max-time 1 "$B/alir.php?besar" | cut -c1-10 | tr '\n' ',')
+  cek "stream dimampatkan: potongan pertama tiba" "${sebagian%%,*}" "potongan 1"
+  cek "stream dimampatkan: belum selesai" "$(echo "$sebagian" | grep -c 'potongan 4')" 0
+  sebagian=$(cu --compressed --max-time 1 "$B/alir.php?sse" | tr '\n' ',')
+  cek "SSE: potongan pertama tiba" "${sebagian%%,*}" "potongan 1"
+  cek "SSE: belum selesai" "$(echo "$sebagian" | grep -c 'potongan 4')" 0
   # perubahan kode harus langsung terlihat, tanpa menunggu opcache
   printf '%s\n' '<?php echo "versi satu";' > "$htd/ubah.php"
   cek "ubah.php versi satu" "$(cu "$B/ubah.php")" "versi satu"
