@@ -149,6 +149,29 @@ pub fn cgi_ini(bin: &Path, dev: bool) -> String {
     s
 }
 
+/// Content-Type untuk akhiran berkas yang tidak ada di tabel bawaan Caddy.
+const MIME_TYPES: &[(&str, &str)] = &[
+    ("font/woff2", "woff2"),
+    ("font/woff", "woff"),
+    ("font/ttf", "ttf"),
+    ("font/otf", "otf"),
+    ("application/vnd.ms-fontobject", "eot"),
+    ("image/x-icon", "ico"),
+    ("image/bmp", "bmp"),
+    ("text/plain; charset=utf-8", "txt"),
+    ("text/csv; charset=utf-8", "csv"),
+    ("application/manifest+json", "webmanifest"),
+    ("application/json", "map"),
+    ("video/mp4", "mp4 m4v"),
+    ("video/webm", "webm"),
+    ("audio/mpeg", "mp3"),
+    ("audio/mp4", "m4a"),
+    ("audio/ogg", "ogg"),
+    ("audio/wav", "wav"),
+    ("application/zip", "zip"),
+    ("application/gzip", "gz"),
+];
+
 /// Path dalam tanda kutip untuk Caddyfile. Di dalam kutip Caddy hanya mengenal `\"`;
 /// garis miring terbalik lain dibiarkan apa adanya. Path Windows ditulis dengan garis miring
 /// biasa, yang diterima Caddy maupun PHP.
@@ -171,8 +194,10 @@ pub fn caddyfile(p: &Project, o: &Opts, port: u16, state: &Path, php: &Php) -> S
         // peringatan Caddy soal HTTP/2 dan HTTP/3 di setiap start.
         s += "\tservers {\n\t\tprotocols h1\n";
         if o.behind_proxy {
-            // Alamat klien diambil dari X-Forwarded-For hanya bila pengirimnya proxy di jaringan privat.
-            s += "\t\ttrusted_proxies static private_ranges\n";
+            // Alamat klien diambil dari X-Forwarded-For hanya bila pengirimnya proxy di jaringan
+            // privat. Strict: dibaca dari kanan, jadi alamat yang diselipkan pengunjung di depan
+            // daftar tidak pernah dipercaya.
+            s += "\t\ttrusted_proxies static private_ranges\n\t\ttrusted_proxies_strict\n";
         }
         s += "\t}\n";
     }
@@ -207,6 +232,21 @@ pub fn caddyfile(p: &Project, o: &Opts, port: u16, state: &Path, php: &Php) -> S
         // Spasi ditulis \x20 karena spasi biasa memotong token di Caddyfile.
         s += "\t@uploads_php path_regexp (?i)^/wp-content/uploads/.*\\.php[.\\x20]*(/|$)\n\trespond @uploads_php 403\n";
     }
+    if p.kind == Kind::Laravel {
+        // Hanya public/index.php yang dijalankan. Berkas .php lain di public, misalnya yang
+        // ditaruh penyusup, diteruskan ke Laravel seperti URL biasa dan berakhir 404.
+        s += "\t@other_php {\n\t\tpath_regexp (?i)\\.php[.\\x20]*(/|$)\n\t\tnot path /index.php /index.php/*\n\t}\n\trewrite @other_php /index.php\n";
+    }
+    // Caddy menebak Content-Type dari tabel milik OS, yang isinya berbeda di tiap mesin dan
+    // kosong di image container. Jenis yang umum di situs web ditetapkan di sini, hanya bila
+    // jawaban belum membawa Content-Type, sehingga jawaban PHP tidak tersentuh.
+    for (i, (mime, exts)) in MIME_TYPES.iter().enumerate() {
+        let paths: Vec<String> = exts.split(' ').map(|e| format!("*.{e}")).collect();
+        s += &format!(
+            "\t@mime{i} path {}\n\theader @mime{i} ?Content-Type \"{mime}\"\n",
+            paths.join(" ")
+        );
+    }
     let upstream = match php {
         Php::Fpm { sock, .. } => q(Path::new(&format!("unix/{}", sock.display()))),
         Php::Cgi { port, .. } => format!("127.0.0.1:{port}"),
@@ -221,19 +261,24 @@ pub fn caddyfile(p: &Project, o: &Opts, port: u16, state: &Path, php: &Php) -> S
     s += "\tencode zstd gzip\n";
     // flush_interval -1: keluaran PHP diteruskan saat itu juga, tidak ditampung dulu.
     // Tanpa ini respons yang dialirkan (SSE, unduhan yang dibangkitkan) baru tiba setelah selesai.
+    let mut opts = String::from("\t\tflush_interval -1\n");
+    if p.kind == Kind::Laravel {
+        // Bawaan Caddy juga mencoba {path}/index.php, yang akan menjalankan index.php di subfolder.
+        opts += "\t\ttry_files {path} index.php\n";
+    }
     if o.behind_proxy {
         // HTTPS berakhir di proxy. Tanpa HTTPS=on, WordPress mengira situsnya HTTP lalu
         // berputar-putar dalam redirect. Hanya dipercaya bila pengirimnya di jaringan privat.
         // REMOTE_ADDR diisi alamat pengunjung, bukan alamat proxy.
         s += "\t@fwd_https {\n\t\theader X-Forwarded-Proto https\n\t\tremote_ip private_ranges\n\t}\n";
         s += &format!(
-            "\tphp_fastcgi @fwd_https {upstream} {{\n\t\tflush_interval -1\n\t\tenv HTTPS on\n\t\tenv REMOTE_ADDR {{client_ip}}\n\t}}\n"
+            "\tphp_fastcgi @fwd_https {upstream} {{\n{opts}\t\tenv HTTPS on\n\t\tenv REMOTE_ADDR {{client_ip}}\n\t}}\n"
         );
         s += &format!(
-            "\tphp_fastcgi {upstream} {{\n\t\tflush_interval -1\n\t\tenv REMOTE_ADDR {{client_ip}}\n\t}}\n"
+            "\tphp_fastcgi {upstream} {{\n{opts}\t\tenv REMOTE_ADDR {{client_ip}}\n\t}}\n"
         );
     } else {
-        s += &format!("\tphp_fastcgi {upstream} {{\n\t\tflush_interval -1\n\t}}\n");
+        s += &format!("\tphp_fastcgi {upstream} {{\n{opts}\t}}\n");
     }
     s += "\tfile_server\n}\n";
     s
@@ -293,7 +338,40 @@ mod tests {
         assert!(!text.contains("bind 127.0.0.1"));
         assert!(text.contains("auto_https off"));
         assert!(text.contains("trusted_proxies static private_ranges"));
+        assert!(text.contains("trusted_proxies_strict"));
         assert!(text.contains("env HTTPS on"));
+    }
+
+    #[test]
+    fn caddyfile_laravel_hanya_menjalankan_index_php() {
+        let dir = project(&["artisan", "public/index.php"]);
+        let o = Opts {
+            dir: dir.clone(),
+            ..Default::default()
+        };
+        let text = caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), &fpm());
+        assert!(text.contains("rewrite @other_php /index.php"));
+        assert!(text.contains("try_files {path} index.php"));
+
+        let dir = project(&["index.php"]);
+        let text = caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), &fpm());
+        assert!(!text.contains("@other_php"));
+        assert!(!text.contains("try_files"));
+    }
+
+    #[test]
+    fn caddyfile_menetapkan_jenis_isi_hanya_bila_belum_ada() {
+        let dir = project(&["index.php"]);
+        let o = Opts {
+            dir: dir.clone(),
+            ..Default::default()
+        };
+        let text = caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), &fpm());
+        assert!(text.contains("path *.woff2\n"));
+        assert!(text.contains("path *.mp4 *.m4v\n"));
+        assert!(text.contains("?Content-Type \"font/woff2\""));
+        // Tanpa tanda tanya, Content-Type dari PHP akan ditimpa atau digandakan.
+        assert!(!text.contains(" Content-Type \""));
     }
 
     #[test]

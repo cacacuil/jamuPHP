@@ -52,22 +52,33 @@ cek() {
     gagal=$((gagal+1)); grup_gagal=$((grup_gagal+1))
   fi
 }
+# Isi jawaban tidak boleh memuat TEKS: bocor NAMA TEKS [opsi curl...] URL
+bocor() {
+  local nama=$1 teks=$2 isi; shift 2
+  isi=$(cu --path-as-is "$@" | tr -d '\0')
+  cek "$nama" "$(has "$isi" "$teks")" no "jawaban memuat [$teks]: $(printf %s "$isi" | head -c 80)"
+}
+# Content-Type tanpa parameter (charset).
+jenis() { hdr "$1" | grep '^content-type:' | sed 's/^content-type: *//; s/;.*//'; }
 # ya/tidak untuk perintah; has/akhiran untuk teks.
 ya() { if "$@"; then echo yes; else echo no; fi; }
 has() { case "$1" in *"$2"*) echo yes;; *) echo no;; esac; }
 akhiran() { case "$1" in *"$2") echo yes;; *) echo no;; esac; }
 
 # Jalankan jamu di latar belakang, tunggu baris "jamu: siap" (maks 40 detik).
-start_jamu() { # DIR PORT LOG
-  "$JAMU" serve "$1" --port "$2" 2> "$3" &
+start_jamu() { # DIR PORT LOG [OPSI...]
+  local dir=$1 port=$2 log=$3; shift 3
+  "$JAMU" serve "$dir" --port "$port" "$@" 2> "$log" &
   JPID=$!
   for _ in $(seq 1 80); do
-    grep -q 'jamu: siap' "$3" 2>/dev/null && return 0
+    grep -q 'jamu: siap' "$log" 2>/dev/null && return 0
     sleep 0.5
   done
   return 1
 }
-stop_jamu() { kill "$JPID" 2>/dev/null; wait "$JPID" 2>/dev/null; }
+stop_jamu() { [ -n "$JPID" ] || return 0; kill "$JPID" 2>/dev/null; wait "$JPID" 2>/dev/null; JPID=""; }
+# Bila skrip ini berhenti di tengah jalan, jamu yang sedang diuji tidak boleh tertinggal.
+trap stop_jamu EXIT
 
 # Ulangi GET sampai 200, maks 5 detik.
 tunggu_200() {
@@ -104,6 +115,30 @@ EOF
   cat > "$htd/lambat.php" <<'EOF'
 <?php usleep(700000); echo 'selesai';
 EOF
+  # Bagian 8 HANDOFF: berkas untuk uji jalur, dotfile, httpoxy, dan berkas statis.
+  mkdir -p "$htd/.well-known" "$htd/sub"
+  printf '%s\n' 'RAHASIA-LUAR' > "$site/di-luar.txt"
+  printf '%s\n' 'RAHASIA-HTACCESS' > "$htd/.htaccess"
+  printf '%s\n' 'RAHASIA-USERINI' > "$htd/.user.ini"
+  printf '%s\n' 'boleh' > "$htd/.well-known/uji.txt"
+  printf '%s\n' 'isi' > "$htd/sub/berkas-di-sub.txt"
+  printf '%s\n' '<?php echo 6 * 7, "-jalan";' > "$htd/gambar.jpg"
+  cat > "$htd/lingkungan.php" <<'EOF'
+<?php header('Content-Type: text/plain');
+echo 'https=', $_SERVER['HTTPS'] ?? '-', ' addr=', $_SERVER['REMOTE_ADDR'], ' proxy=', $_SERVER['HTTP_PROXY'] ?? '-', '|', getenv('HTTP_PROXY') ?: '-', "\n";
+EOF
+  printf '%s\n' 'console.log(1);' > "$htd/a.js"
+  printf '%s\n' 'export default 1;' > "$htd/a.mjs"
+  printf '%s\n' '<svg xmlns="http://www.w3.org/2000/svg"/>' > "$htd/a.svg"
+  printf '%s\n' '{"a":1}' > "$htd/a.json"
+  printf '%s\n' '{"name":"uji"}' > "$htd/a.webmanifest"
+  printf '%s\n' 'teks biasa' > "$htd/a.txt"
+  printf '%s\n' '<!doctype html><title>uji</title>' > "$htd/a.html"
+  printf '\x89PNG\r\n\x1a\n' > "$htd/a.png"
+  printf 'wOF2\0\1\0\0' > "$htd/a.woff2"
+  printf 'RIFF\x1a\0\0\0WEBPVP8 ' > "$htd/a.webp"
+  printf '\0\0\1\0\1\0' > "$htd/a.ico"
+  printf '\0asm\1\0\0\0' > "$htd/a.wasm"
   for i in $(seq 1 300); do echo "body { color: #333; margin: 0; } /* aturan gaya nomor $i */"; done > "$htd/gaya.css"
   head -c 100000000 /dev/urandom > "$work/besar-100.bin"
   head -c 200000000 /dev/zero > "$work/besar-200.bin"
@@ -129,7 +164,55 @@ EOF
   # 3. berkas tersembunyi tidak boleh terlayani
   cek "/.env 404" "$(kode "$B/.env")" 404
   cek "/.git/config 404" "$(kode "$B/.git/config")" 404
-  # 4. kompresi gzip
+  cek "/.htaccess 404" "$(kode "$B/.htaccess")" 404
+  cek "/.user.ini 404" "$(kode "$B/.user.ini")" 404
+  cek "/.well-known/uji.txt 200" "$(kode "$B/.well-known/uji.txt")" 200
+  # jalur: tidak boleh keluar dari document root, byte nol tidak boleh membocorkan sumber
+  local u
+  for u in /../di-luar.txt /..%2fdi-luar.txt /%2e%2e/di-luar.txt /..%5cdi-luar.txt /sub/../../di-luar.txt \
+    /sub/..%2f..%2fdi-luar.txt //../di-luar.txt '/..\di-luar.txt' /....//di-luar.txt; do
+    bocor "jalur $u tidak keluar dari root" RAHASIA-LUAR "$B$u"
+  done
+  for u in /index.php%00.css /gaya.css%00.php /index.php%00 /%00; do
+    bocor "byte nol $u tidak membocorkan sumber" '<?php' "$B$u"
+  done
+  # hanya berkas .php yang ada di disk yang dijalankan
+  bocor "/gambar.jpg/y.php tidak dijalankan" 42-jalan "$B/gambar.jpg/y.php"
+  bocor "/gambar.jpg/index.php tidak dijalankan" 42-jalan "$B/gambar.jpg/index.php"
+  bocor "/gambar.jpg%00.php tidak dijalankan" 42-jalan "$B/gambar.jpg%00.php"
+  # tanpa daftar isi direktori
+  bocor "/sub/ tanpa daftar isi" berkas-di-sub "$B/sub/"
+  # httpoxy: header Proxy dari pengunjung tidak boleh menjadi HTTP_PROXY
+  bocor "header Proxy dibuang (httpoxy)" jahat -H 'Proxy: http://jahat.invalid:1' "$B/lingkungan.php"
+  # mode dev tidak di belakang proxy: header terusan tidak dipercaya
+  local l
+  l=$(cu -H 'X-Forwarded-Proto: https' -H 'X-Forwarded-For: 203.0.113.9' "$B/lingkungan.php")
+  cek "dev: X-Forwarded-Proto diabaikan" "$(has "$l" 'https=-')" yes "$l"
+  cek "dev: X-Forwarded-For diabaikan" "$(has "$l" 'addr=127.0.0.1')" yes "$l"
+  # berkas statis: jenis isi, ETag, Range, HEAD
+  cek "jenis .css" "$(jenis "$B/gaya.css")" text/css
+  cek "jenis .js" "$(jenis "$B/a.js")" text/javascript
+  cek "jenis .mjs" "$(jenis "$B/a.mjs")" text/javascript
+  cek "jenis .svg" "$(jenis "$B/a.svg")" image/svg+xml
+  cek "jenis .json" "$(jenis "$B/a.json")" application/json
+  cek "jenis .webmanifest" "$(jenis "$B/a.webmanifest")" application/manifest+json
+  cek "jenis .txt" "$(jenis "$B/a.txt")" text/plain
+  cek "jenis .html" "$(jenis "$B/a.html")" text/html
+  cek "jenis .png" "$(jenis "$B/a.png")" image/png
+  cek "jenis .woff2" "$(jenis "$B/a.woff2")" font/woff2
+  cek "jenis .webp" "$(jenis "$B/a.webp")" image/webp
+  cek "jenis .ico" "$(has "$(jenis "$B/a.ico")" icon)" yes "$(jenis "$B/a.ico")"
+  cek "jenis .wasm" "$(jenis "$B/a.wasm")" application/wasm
+  local etag
+  etag=$(cu -o /dev/null -D - "$B/gaya.css" | tr -d '\r' | grep -i '^etag:' | sed 's/^[^:]*: *//')
+  cek "gaya.css punya ETag" "$([ -n "$etag" ] && echo yes || echo no)" yes
+  cek "If-None-Match 304" "$(kode -H "If-None-Match: $etag" "$B/gaya.css")" 304
+  cek "Range 206" "$(kode -r 0-9 "$B/gaya.css")" 206
+  cek "Range isi 10 byte pertama" "$(cu -r 0-9 "$B/gaya.css")" 'body { col'
+  cek "HEAD gaya.css 200" "$(kode -I "$B/gaya.css")" 200
+  # 4. kompresi
+  cek "gaya.css zstd" "$(has "$(hdr -H 'Accept-Encoding: zstd' "$B/gaya.css")" 'content-encoding: zstd')" yes
+  cek "a.png tidak dikompresi" "$(has "$(hdr -H 'Accept-Encoding: gzip' "$B/a.png")" 'content-encoding')" no
   cek "gaya.css gzip" "$(has "$(hdr -H 'Accept-Encoding: gzip' "$B/gaya.css")" 'content-encoding: gzip')" yes
   # 5-6. unggah berkas
   local r
@@ -198,6 +281,31 @@ EOF
   akhir_grup "$log"
 }
 
+grup_proxy() {
+  echo "== di belakang proxy =="
+  local site="$work/proxy" log="$work/proxy.log" B=http://127.0.0.1:8104 l
+  mkdir -p "$site"
+  cat > "$site/index.php" <<'EOF'
+<?php header('Content-Type: text/plain');
+echo 'https=', $_SERVER['HTTPS'] ?? '-', ' addr=', $_SERVER['REMOTE_ADDR'], ' proxy=', $_SERVER['HTTP_PROXY'] ?? '-', "\n";
+EOF
+  if ! start_jamu "$site" 8104 "$log" --behind-proxy; then
+    cek "jamu siap (proxy)" no yes "jamu tidak menampilkan 'jamu: siap' dalam 40 detik"
+    stop_jamu; akhir_grup "$log"; return
+  fi
+  l=$(cu "$B/")
+  cek "tanpa header terusan: bukan HTTPS" "$(has "$l" 'https=-')" yes "$l"
+  l=$(cu -H 'X-Forwarded-Proto: https' -H 'X-Forwarded-For: 203.0.113.9' "$B/")
+  cek "proxy jaringan privat: HTTPS=on" "$(has "$l" 'https=on')" yes "$l"
+  cek "proxy jaringan privat: alamat pengunjung" "$(has "$l" 'addr=203.0.113.9')" yes "$l"
+  # Pengunjung menyelipkan alamat palsu di depan; yang dipakai alamat yang ditambahkan proxy.
+  l=$(cu -H 'X-Forwarded-For: 198.51.100.1, 203.0.113.9' "$B/")
+  cek "X-Forwarded-For palsu di depan diabaikan" "$(has "$l" 'addr=203.0.113.9')" yes "$l"
+  bocor "header Proxy dibuang (httpoxy)" jahat -H 'Proxy: http://jahat.invalid:1' "$B/"
+  stop_jamu
+  akhir_grup "$log"
+}
+
 grup_laravel() {
   echo "== laravel =="
   if [ -z "${LARAVEL_DIR:-}" ]; then echo "lewati: laravel (LARAVEL_DIR tidak diset)"; return; fi
@@ -215,6 +323,19 @@ grup_laravel() {
   cek "uji-sesi kedua" "$s2" '{"n":2}'
   cek "/tidak-ada 404" "$(kode "$B/tidak-ada")" 404
   cek "/.env 404" "$(kode "$B/.env")" 404
+  # Hanya public/index.php yang dijalankan: berkas .php lain di public tidak pernah jalan.
+  printf '%s\n' '<?php echo 6 * 7, "-jalan";' > "$LARAVEL_DIR/public/lain.php"
+  mkdir -p "$LARAVEL_DIR/public/sub"
+  printf '%s\n' '<?php echo 6 * 7, "-jalan";' > "$LARAVEL_DIR/public/sub/index.php"
+  local u
+  for u in /lain.php /lain.php/x /LAIN.PHP /lain.php. /lain.php%20 /sub/ /sub/index.php; do
+    bocor "$u tidak dijalankan" 42-jalan "$B$u"
+    bocor "$u tidak tersaji sebagai sumber" '<?php' "$B$u"
+  done
+  cek "/lain.php 404 dari Laravel" "$(kode "$B/lain.php")" 404
+  cek "/index.php/up 200" "$(kode "$B/index.php/up")" 200
+  cek "/robots.txt 200" "$(kode "$B/robots.txt")" 200
+  rm -f "$LARAVEL_DIR/public/lain.php" "$LARAVEL_DIR/public/sub/index.php"; rmdir "$LARAVEL_DIR/public/sub"
   stop_jamu
   akhir_grup "$log"
 }
@@ -243,6 +364,9 @@ grup_wp() {
   # REST: pakai /wp-json/ bila berfungsi, jika tidak /?rest_route=/
   if [ "$(kode "$B/wp-json/")" = 200 ]; then rest="$B/wp-json/"; else rest="$B/?rest_route=/"; fi
   cek "REST API $rest 200" "$(kode "$rest")" 200
+  cek "/tidak-ada/ 404 dari WordPress" "$(kode "$B/tidak-ada-sama-sekali/")" 404
+  cek "/wp-login.php 200" "$(kode "$B/wp-login.php")" 200
+  bocor "/wp-config.php tidak tersaji sebagai sumber" DB_PASSWORD "$B/wp-config.php"
   cek "aset core 200" "$(kode "$B/wp-includes/css/dist/block-library/style.min.css")" 200
   # PHP di folder unggahan harus diblokir
   mkdir -p "$wp/wp-content/uploads/2026"
@@ -266,6 +390,7 @@ grup_wp() {
 }
 
 grup_php
+grup_proxy
 grup_laravel
 grup_wp
 

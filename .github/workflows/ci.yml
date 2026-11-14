@@ -31,7 +31,29 @@ jobs:
           docker tag jamuphp:8.4 "$target"
           docker push "$target"
 
-  # Spike S2: jamu + Caddy + php-cgi dari zip resmi PHP, di Windows asli.
+  # jamu + Caddy + php-fpm dari paket distro: jalur yang dipakai developer di Linux.
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release --locked
+      - name: Pasang php-fpm dan Caddy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q php8.3-fpm php8.3-cli php8.3-sqlite3 php8.3-mbstring php8.3-xml php8.3-curl php8.3-zip
+          mkdir -p unduh bin
+          gh release download --repo caddyserver/caddy --pattern '*_linux_amd64.tar.gz' --dir unduh
+          tar -xzf unduh/caddy_*_linux_amd64.tar.gz -C bin caddy
+          bin/caddy version
+          php -v
+      - name: Siapkan Laravel dan WordPress
+        run: bash tests/sites.sh sites
+      - name: Uji end-to-end
+        run: JAMU_CADDY="$PWD/bin/caddy" LARAVEL_DIR="$PWD/sites/laravel" WP_DIR="$PWD/sites/wp" bash tests/e2e.sh
+
+  # jamu + Caddy + php-cgi dari zip resmi PHP, di Windows asli.
   windows:
     runs-on: windows-latest
     strategy:
@@ -65,53 +87,13 @@ jobs:
       - name: Siapkan Laravel dan WordPress
         run: |
           root=$(cygpath -m "$PWD")
-          mkdir -p sites
           # php.ini ini hanya untuk composer dan artisan di langkah ini. jamu tidak memakainya:
           # ia menulis php.ini sendiri dan menunjuknya dengan -c.
           mkdir -p unduh/ini
           printf 'extension_dir = "%s/dist/php/ext"\n' "$root" > unduh/ini/php.ini
           for e in curl fileinfo mbstring openssl pdo_sqlite sqlite3 zip; do echo "extension = $e" >> unduh/ini/php.ini; done
           export PHPRC="$root/unduh/ini" PATH="$PWD/dist/php:$PATH"
-          curl -fsSL -o unduh/composer.phar https://getcomposer.org/download/latest-stable/composer.phar
-          php unduh/composer.phar create-project laravel/laravel sites/laravel --no-interaction --prefer-dist --quiet
-          cat >> sites/laravel/routes/web.php <<'EOF'
-          Route::get('/uji-db', fn () => ['pengguna' => \Illuminate\Support\Facades\DB::table('users')->count()]);
-          Route::get('/uji-sesi', function () { session(['n' => session('n', 0) + 1]); return ['n' => session('n')]; });
-          EOF
-          (cd sites/laravel && php artisan --version && php artisan migrate --force)
-
-          curl -fsSL -o unduh/wp.zip https://wordpress.org/latest.zip
-          unzip -q unduh/wp.zip -d sites
-          mv sites/wordpress sites/wp
-          curl -fsSL -o unduh/sqlite.zip https://downloads.wordpress.org/plugin/sqlite-database-integration.zip
-          unzip -q unduh/sqlite.zip -d sites/wp/wp-content/plugins
-          cp sites/wp/wp-content/plugins/sqlite-database-integration/db.copy sites/wp/wp-content/db.php
-          cat > sites/wp/wp-config.php <<'EOF'
-          <?php
-          define( 'DB_NAME', 'wp' );
-          define( 'DB_USER', 'wp' );
-          define( 'DB_PASSWORD', 'wp' );
-          define( 'DB_HOST', 'localhost' );
-          define( 'DB_CHARSET', 'utf8mb4' );
-          define( 'DB_COLLATE', '' );
-          define( 'AUTH_KEY', 'uji-1' );
-          define( 'SECURE_AUTH_KEY', 'uji-2' );
-          define( 'LOGGED_IN_KEY', 'uji-3' );
-          define( 'NONCE_KEY', 'uji-4' );
-          define( 'AUTH_SALT', 'uji-5' );
-          define( 'SECURE_AUTH_SALT', 'uji-6' );
-          define( 'LOGGED_IN_SALT', 'uji-7' );
-          define( 'NONCE_SALT', 'uji-8' );
-          $table_prefix = 'wp_';
-          define( 'WP_DEBUG', false );
-          define( 'DISABLE_WP_CRON', true );
-          define( 'WP_HTTP_BLOCK_EXTERNAL', true );
-          define( 'AUTOMATIC_UPDATER_DISABLED', true );
-          if ( ! defined( 'ABSPATH' ) ) {
-          	define( 'ABSPATH', __DIR__ . '/' );
-          }
-          require_once ABSPATH . 'wp-settings.php';
-          EOF
+          bash tests/sites.sh sites
       - name: Uji end-to-end (sama dengan Linux)
         run: |
           root=$(cygpath -m "$PWD")
