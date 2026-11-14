@@ -1549,8 +1549,9 @@ dalam 3,7 detik.
 
 ## 21. Fase 2: production (sedang berjalan)
 
-Dikerjakan di branch `fase-2`. `main` tidak disentuh: push ke `main` menerbitkan ulang
-image `:8.4`, dan itu keputusan owner.
+Dikerjakan di branch `fase-2` dan digabung ke `main` atas permintaan owner, sehingga image
+`:8.4` di GHCR sudah berisi hasil fase ini, termasuk `msmtp`. Yang masih berjalan adalah
+uji dengan layanan sungguhan dan masa 30 hari di syarat lulus.
 
 ### Yang dibuat
 
