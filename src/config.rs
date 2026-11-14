@@ -496,11 +496,14 @@ pub fn caddyfile(
     // Yang sampai di sini bukan urusan PHP, jadi Content-Type di bawah hanya mengenai berkas
     // statis. Caddy sendiri menebaknya dari tabel milik OS: di Windows tabel itu menyebut
     // .mjs sebagai text/plain, dan di image container tabelnya kosong.
-    for (i, (mime, exts)) in MIME_TYPES.iter().enumerate() {
-        let paths: Vec<String> = exts.split(' ').map(|e| format!("*.{e}")).collect();
-        s += &format!("\t@mime{i} path {}\n", paths.join(" "));
-        route += &format!("\t\theader @mime{i} Content-Type \"{mime}\"\n");
+    // Satu tabel, dicari sekali per permintaan. Satu matcher dan satu `header` per jenis
+    // (31 pasang) terukur memperlambat berkas statis sekitar 20%.
+    s += "\tmap {file.ext} {jamu_mime} {\n";
+    for (mime, exts) in MIME_TYPES {
+        s += &format!("\t\t~(?i)^\\.({})$ \"{mime}\"\n", exts.replace(' ', "|"));
     }
+    s += "\t\tdefault \"\"\n\t}\n\t@mime not vars {jamu_mime} \"\"\n";
+    route += "\t\theader @mime Content-Type {jamu_mime}\n";
     route += "\t\tfile_server\n";
     s += &format!("\tencode zstd gzip\n\troute {{\n{route}\t}}\n}}\n");
     s
@@ -835,13 +838,18 @@ mod tests {
             &fpm(),
             Limits::default(),
         );
-        assert!(text.contains("path *.js *.mjs\n"));
+        // Satu tabel dan satu `header`: akhiran dicari sekali per permintaan, huruf besar
+        // atau kecil.
+        assert!(text.contains("\tmap {file.ext} {jamu_mime} {\n"));
+        assert!(text.contains("\t\t~(?i)^\\.(js|mjs)$ \"text/javascript; charset=utf-8\"\n"));
+        assert!(text.contains("\t\t~(?i)^\\.(gz)$ \"application/gzip\"\n"));
+        assert_eq!(text.matches("header @mime").count(), 1);
         let at = |needle: &str| text.find(needle).expect(needle);
         // Urutan di dalam route: tolak, PHP, jenis isi, berkas statis.
         assert!(at("route {") < at("respond @hidden 404"));
         assert!(at("respond @hidden 404") < at("php_fastcgi"));
-        assert!(at("php_fastcgi") < at("Content-Type \"text/javascript; charset=utf-8\""));
-        assert!(at("Content-Type \"application/gzip\"") < at("file_server"));
+        assert!(at("php_fastcgi") < at("header @mime Content-Type {jamu_mime}"));
+        assert!(at("header @mime Content-Type {jamu_mime}") < at("file_server"));
     }
 
     #[test]
