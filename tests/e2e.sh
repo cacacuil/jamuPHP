@@ -6,12 +6,13 @@ set -u
 JAMU="${JAMU:-./target/release/jamu}"
 # Path mutlak: beberapa tes menjalankan jamu dari dalam folder situs.
 JAMU="$(cd "$(dirname "$JAMU")" && pwd)/$(basename "$JAMU")"
+here="$(cd "$(dirname "$0")" && pwd)"
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) windows=1;; *) windows=0;; esac
 if [ "$windows" = 1 ]; then PHP_PROC="${PHP_PROC:-php-cgi.exe}"; else PHP_PROC="${PHP_PROC:-php-fpm}"; fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/jamu-e2e.XXXXXX")
 # Di Git Bash, path gaya Windows (C:/...) dimengerti bash maupun program Windows asli.
-[ "$windows" = 1 ] && work=$(cygpath -m "$work")
+[ "$windows" = 1 ] && work=$(cygpath -m "$work") && here=$(cygpath -m "$here")
 lulus=0; gagal=0; grup_gagal=0
 JPID=""
 
@@ -408,6 +409,77 @@ EOF
   akhir_grup "$log"
 }
 
+# Aturan khusus WordPress, diuji pada situs tiruan di belakang proxy: berkas cache plugin,
+# multisite subdirektori, wp-cron, dan log akses. Plugin sungguhan diuji di grup wordpress.
+grup_wp_aturan() {
+  echo "== aturan wordpress: cache, multisite, wp-cron =="
+  local site="$work/wp-aturan" log="$work/wp-aturan.log" B=http://127.0.0.1:8107 r c
+  local cache="$site/wp-content/cache/supercache/situs.test" plugin="$site/wp-content/plugins/wp-super-cache"
+  mkdir -p "$cache/halo" "$plugin" "$site/wp-admin" "$site/wp-content/uploads" "$site/wp-content/.git"
+  printf '%s\n' '<?php' 'define( "MULTISITE", true );' 'define( "SUBDOMAIN_INSTALL", false );' > "$site/wp-config.php"
+  printf '%s\n' '<?php // tiruan' > "$site/wp-load.php"
+  printf '%s\n' '<?php header("X-Dari: php"); echo "php:", $_SERVER["REQUEST_URI"];' > "$site/index.php"
+  cp "$site/index.php" "$site/wp-admin/index.php"
+  printf '%s\n' '<?php echo "CRON-JALAN\n";' > "$site/wp-cron.php"
+  printf '%s\n' '<?php' > "$plugin/wp-cache-phase1.php"
+  printf '%s\n' '<?php echo "DIEKSEKUSI";' > "$site/wp-content/uploads/x.php"
+  echo RAHASIA-GIT > "$site/wp-content/.git/config"
+  echo CACHE-HTTP-BERANDA > "$cache/index.html"
+  echo CACHE-HTTPS-BERANDA > "$cache/index-https.html"
+  echo CACHE-HTTPS-HALO > "$cache/halo/index-https.html"
+  if ! start_jamu "$site" 8107 "$log" --behind-proxy; then
+    cek "jamu siap (aturan wordpress)" no yes "jamu tidak menampilkan 'jamu: siap' dalam 40 detik"
+    stop_jamu; akhir_grup "$log"; return
+  fi
+  c() { cu -H 'Host: situs.test' "$@"; }
+  # berkas cache disajikan Caddy, tiap skema dengan berkasnya sendiri
+  cek "cache: GET / lewat HTTP" "$(c "$B/")" CACHE-HTTP-BERANDA
+  cek "cache: GET / lewat HTTPS dari proxy" "$(c -H 'X-Forwarded-Proto: https' "$B/")" CACHE-HTTPS-BERANDA
+  cek "cache: GET /halo/ lewat HTTPS" "$(c -H 'X-Forwarded-Proto: https' "$B/halo/")" CACHE-HTTPS-HALO
+  cek "cache: HEAD / 200" "$(c -I -o /dev/null -w '%{http_code}' "$B/")" 200
+  r=$(c -o /dev/null -D - "$B/" | tr -d '\r' | tr 'A-Z' 'a-z')
+  cek "cache: tidak lewat PHP" "$(has "$r" 'x-dari: php')" no
+  cek "cache: Cache-Control pendek" "$(has "$r" 'cache-control: max-age=3, must-revalidate')" yes "$r"
+  cek "cache: jenis isi text/html" "$(has "$r" 'content-type: text/html')" yes "$r"
+  # yang tidak boleh menerima cache diteruskan ke PHP
+  cek "cache: varian HTTP belum ada -> PHP" "$(c "$B/halo/")" "php:/halo/"
+  cek "cache: ada query -> PHP" "$(c "$B/?x=1")" "php:/?x=1"
+  cek "cache: pengunjung masuk log -> PHP" "$(c -H 'Cookie: wordpress_logged_in_abc=1' "$B/")" "php:/"
+  cek "cache: komentator -> PHP" "$(c -H 'Cookie: comment_author_abc=x' "$B/")" "php:/"
+  cek "cache: POST -> PHP" "$(c -X POST "$B/")" "php:/"
+  cek "cache: host lain -> PHP" "$(cu -H 'Host: lain.test' "$B/")" "php:/"
+  bocor "cache: host tidak lazim tidak membuka berkas cache" CACHE -H 'Host: ../situs.test' "$B/"
+  bocor "cache: host huruf besar tidak salah folder" CACHE -H 'Host: SITUS.TEST' "$B/"
+  # folder plugin dihapus tanpa dinonaktifkan: berkas cache yang tertinggal tidak disajikan lagi
+  mv "$plugin" "$plugin.dihapus"
+  cek "cache: plugin dihapus -> PHP" "$(c "$B/")" "php:/"
+  mv "$plugin.dihapus" "$plugin"
+  cek "cache: plugin kembali -> cache" "$(c "$B/")" CACHE-HTTP-BERANDA
+  # multisite subdirektori
+  r=$(c -o /dev/null -w '%{http_code} %{redirect_url}' "$B/toko/wp-admin")
+  cek "multisite: /toko/wp-admin 301" "${r%% *}" 301
+  cek "multisite: ke /toko/wp-admin/" "$(akhiran "${r#* }" /toko/wp-admin/)" yes "$r"
+  cek "multisite: /toko/wp-admin/index.php dijalankan" "$(c "$B/toko/wp-admin/index.php")" "php:/toko/wp-admin/index.php"
+  cek "multisite: /toko/halaman/ ke index.php" "$(c "$B/toko/halaman/")" "php:/toko/halaman/"
+  cek "multisite: PHP di uploads tetap 403" "$(kode "$B/toko/wp-content/uploads/x.php")" 403
+  cek "multisite: dotfile tetap 404" "$(kode "$B/toko/wp-content/.git/config")" 404
+  bocor "multisite: dotfile tidak bocor" RAHASIA "$B/toko/wp-content/.git/config"
+  # log akses: satu baris per permintaan, tanpa pemeriksaan kesehatan
+  sleep 0.5
+  cek "log akses mencatat permintaan" "$(ya grep -q '\[akses\] 127.0.0.1 GET /toko/halaman/ 200' "$log")" yes
+  # Ping hanya ada di jalur php-fpm; php-cgi tidak punya padanannya.
+  if [ "$PHP_PROC" = php-fpm ]; then
+    cek "ping dijawab" "$(cu "$B/-/jamu/ping")" pong
+    sleep 0.5
+    cek "log akses tidak mencatat ping" "$(grep -c 'jamu/ping' "$log")" 0
+  fi
+  # wp-cron tanpa pengunjung (paling lama menunggu satu pergantian menit)
+  for _ in $(seq 1 150); do grep -q 'CRON-JALAN' "$log" && break; sleep 0.5; done
+  cek "wp-cron dijalankan penjadwal" "$(ya grep -q '\[schedule\] CRON-JALAN' "$log")" yes
+  stop_jamu
+  akhir_grup "$log"
+}
+
 grup_laravel() {
   echo "== laravel =="
   if [ -z "${LARAVEL_DIR:-}" ]; then echo "lewati: laravel (LARAVEL_DIR tidak diset)"; return; fi
@@ -514,6 +586,35 @@ grup_wp() {
   cek "login 302" "${r%% *}" 302
   cek "login redirect ke /wp-admin/" "$(akhiran "${r#* }" /wp-admin/)" yes "redirect=${r#* }"
   cek "/wp-admin/ dengan login 200" "$(kode -c "$jar" -b "$jar" "$B/wp-admin/")" 200
+  # Plugin cache sungguhan, bila ikut di situs uji: berkas yang ia buat disajikan Caddy.
+  # Jawaban dari berkas dikenali dari Accept-Ranges, yang tidak pernah dikirim PHP.
+  local sc="$wp/wp-content/plugins/wp-super-cache" f dari
+  dari() { has "$(hdr "$@")" 'accept-ranges: bytes' | sed 's/yes/berkas/; s/no/php/'; }
+  if [ -d "$sc" ]; then
+    cek "sebelum plugin aktif: / dari PHP" "$(dari "$B/")" php
+    r=$(cd "$wp" && "$JAMU" php "$here/wpsc.php" 127.0.0.1:8103 2>&1)
+    cek "plugin cache diaktifkan" "$(has "$r" 'plugin aktif: ya, advanced-cache.php: ada')" yes "$r"
+    cek "permintaan pertama dari PHP" "$(dari "$B/")" php
+    f=""
+    for _ in $(seq 1 10); do
+      f=$(find "$wp/wp-content/cache/supercache" -name index.html 2>/dev/null | head -1)
+      [ -n "$f" ] && break
+      cu -o /dev/null "$B/"; sleep 0.5
+    done
+    cek "plugin membuat berkas cache" "$([ -n "$f" ] && echo yes || echo no)" yes "$(find "$wp/wp-content/cache" 2>/dev/null | head -20)"
+    cek "permintaan berikutnya dari berkas" "$(dari "$B/")" berkas
+    cek "isinya sama dengan berkas plugin" "$(cu "$B/" | sha256sum | cut -d' ' -f1)" "$(sha256sum < "${f:-/dev/null}" | cut -d' ' -f1)"
+    cek "dengan query: dari PHP" "$(dari "$B/?x=1")" php
+    cek "pengunjung yang masuk log: dari PHP" "$(dari -c "$jar" -b "$jar" "$B/")" php
+    cek "halaman admin tidak ikut di-cache" "$(kode -c "$jar" -b "$jar" "$B/wp-admin/")" 200
+    # folder plugin dihapus tanpa dinonaktifkan: berkas cache tertinggal, tetapi tidak disajikan
+    mv "$sc" "$sc.dihapus"
+    cek "plugin dihapus paksa: dari PHP" "$(dari "$B/")" php
+    cek "plugin dihapus paksa: situs tetap jalan" "$(kode "$B/")" 200
+    mv "$sc.dihapus" "$sc"
+  else
+    echo "lewati: plugin cache (wp-super-cache tidak ada di situs uji)"
+  fi
   stop_jamu
   akhir_grup "$log"
 }
@@ -521,6 +622,7 @@ grup_wp() {
 grup_php
 grup_proxy
 grup_toml
+grup_wp_aturan
 grup_laravel
 grup_wp
 

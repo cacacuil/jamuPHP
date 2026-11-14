@@ -17,6 +17,43 @@ pub struct Project {
     pub kind: Kind,
     /// Batasan versi PHP dari composer.json, misalnya "^8.2".
     pub php_wanted: Option<String>,
+    /// WordPress multisite dengan situs di subfolder (`/toko/`, `/blog/`). Butuh aturan
+    /// tulis-ulang tambahan; multisite subdomain tidak.
+    pub wp_subdir_multisite: bool,
+}
+
+/// Nilai `define('NAMA', true|false)` di wp-config.php. Baris komentar dilewati.
+fn wp_define(config: &str, name: &str) -> Option<bool> {
+    config
+        .lines()
+        .map(str::trim_start)
+        .filter(|l| !(l.starts_with("//") || l.starts_with('#') || l.starts_with('*')))
+        .find_map(|line| {
+            let line: String = line
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .map(|c| if c == '"' { '\'' } else { c })
+                .collect();
+            let (_, value) = line.split_once(&format!("define('{name}',"))?;
+            let value = value.to_ascii_lowercase();
+            if value.starts_with("true") || value.starts_with('1') {
+                Some(true)
+            } else if value.starts_with("false") || value.starts_with('0') {
+                Some(false)
+            } else {
+                None
+            }
+        })
+}
+
+fn wp_subdir_multisite(root: &Path) -> bool {
+    // WordPress juga menerima wp-config.php satu folder di atas.
+    let config = [root.join("wp-config.php"), root.join("../wp-config.php")]
+        .iter()
+        .find_map(|f| fs::read_to_string(f).ok())
+        .unwrap_or_default();
+    wp_define(&config, "MULTISITE") == Some(true)
+        && wp_define(&config, "SUBDOMAIN_INSTALL") != Some(true)
 }
 
 pub fn detect(dir: &Path) -> Project {
@@ -45,11 +82,14 @@ pub fn detect(dir: &Path) -> Project {
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| v["require"]["php"].as_str().map(str::to_owned));
 
+    let wp_subdir_multisite = kind == Kind::WordPress && wp_subdir_multisite(&root);
+
     Project {
         dir: dir.to_path_buf(),
         root,
         kind,
         php_wanted,
+        wp_subdir_multisite,
     }
 }
 
@@ -98,6 +138,28 @@ mod tests {
         assert_eq!(p.kind, Kind::Php);
         assert_eq!(p.root, dir);
         assert_eq!(p.php_wanted, None);
+    }
+
+    #[test]
+    fn multisite_subdirektori_dikenali_dari_wp_config() {
+        let with = |config: &str| {
+            let dir = project(&["wp-load.php", "index.php"]);
+            fs::write(dir.join("wp-config.php"), config).unwrap();
+            detect(&dir).wp_subdir_multisite
+        };
+        assert!(with(
+            "<?php\ndefine( 'MULTISITE', true );\ndefine( 'SUBDOMAIN_INSTALL', false );\n"
+        ));
+        assert!(with("<?php\ndefine(\"MULTISITE\",TRUE);\n"));
+        // Subdomain: aturan biasa sudah cukup.
+        assert!(!with(
+            "<?php\ndefine( 'MULTISITE', true );\ndefine( 'SUBDOMAIN_INSTALL', true );\n"
+        ));
+        // Baru diizinkan, belum dinyalakan.
+        assert!(!with("<?php\ndefine( 'WP_ALLOW_MULTISITE', true );\n"));
+        assert!(!with("<?php\n// define( 'MULTISITE', true );\n"));
+        assert!(!with("<?php\ndefine( 'MULTISITE', false );\n"));
+        assert!(!with("<?php\n"));
     }
 
     #[test]

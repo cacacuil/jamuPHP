@@ -29,9 +29,29 @@ pub fn plain_log(name: &str, line: &str) -> Option<String> {
     Some(format!("[{name}] {line}"))
 }
 
-/// Catatan galat PHP di jalur php-cgi tiba lewat Caddy, terbungkus JSON. Yang ditampilkan
-/// isinya saja, seperti di jalur php-fpm.
+/// Log akses Caddy, diringkas menjadi satu baris: alamat pengunjung, permintaan, kode
+/// jawaban, dan lama dilayani.
+fn access_line(v: &serde_json::Value) -> Option<String> {
+    let request = &v["request"];
+    Some(format!(
+        "[akses] {} {} {} {} {} ms",
+        request["client_ip"].as_str()?,
+        request["method"].as_str()?,
+        request["uri"].as_str()?,
+        v["status"].as_u64()?,
+        (v["duration"].as_f64()? * 1000.0).round()
+    ))
+}
+
+/// Dua jenis baris Caddy ditulis ulang: log akses, dan catatan galat PHP di jalur php-cgi,
+/// yang tiba lewat Caddy terbungkus JSON dan ditampilkan isinya saja seperti di jalur php-fpm.
 fn caddy_log(name: &str, line: &str) -> Option<String> {
+    if line.contains(r#""logger":"http.log.access"#)
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(line)
+        && let Some(text) = access_line(&v)
+    {
+        return Some(text);
+    }
     if line.contains(r#""msg":"stderr""#)
         && let Ok(v) = serde_json::from_str::<serde_json::Value>(line)
         && let Some(body) = v["body"].as_str()
@@ -182,8 +202,8 @@ pub fn supervise(plan: &Plan, stop: &AtomicBool, ready: impl FnOnce()) -> Result
     }
     services[1].log = caddy_log;
     let mut ready = Some(ready);
-    // Tugas terjadwal yang sedang berjalan. Seperti cron: dijalankan tiap pergantian menit,
-    // tanpa menunggu yang sebelumnya selesai.
+    // Tugas terjadwal yang sedang berjalan. Seperti cron: dijalankan tiap pergantian menit.
+    // `schedule:run` Laravel tidak menunggu yang sebelumnya selesai; wp-cron menunggu.
     let mut runs: Vec<Child> = Vec::new();
     let mut last_minute = minute_now();
 
@@ -233,14 +253,6 @@ pub fn supervise(plan: &Plan, stop: &AtomicBool, ready: impl FnOnce()) -> Result
             }
         }
         if let Some(task) = &plan.schedule {
-            let minute = minute_now();
-            if minute != last_minute {
-                last_minute = minute;
-                match spawn(&task.name, shell_cmd(plan, &task.run), task.log) {
-                    Ok(child) => runs.push(child),
-                    Err(e) => say!("jamu: {} gagal dijalankan: {e}", task.name),
-                }
-            }
             runs.retain_mut(|child| match child.try_wait() {
                 Ok(Some(status)) => {
                     if !status.success() {
@@ -251,6 +263,14 @@ pub fn supervise(plan: &Plan, stop: &AtomicBool, ready: impl FnOnce()) -> Result
                 Ok(None) => true,
                 Err(_) => false,
             });
+            let minute = minute_now();
+            if minute != last_minute && (task.overlap || runs.is_empty()) {
+                last_minute = minute;
+                match spawn(&task.name, shell_cmd(plan, &task.run), task.log) {
+                    Ok(child) => runs.push(child),
+                    Err(e) => say!("jamu: {} gagal dijalankan: {e}", task.name),
+                }
+            }
         }
         os::reap_orphans(
             &services
@@ -302,4 +322,27 @@ pub fn supervise(plan: &Plan, stop: &AtomicBool, ready: impl FnOnce()) -> Result
         let _ = fs::remove_file(sock);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_akses_diringkas_dan_baris_lain_dibiarkan() {
+        let access = r#"{"level":"info","ts":1.5,"logger":"http.log.access.log0","msg":"handled request","request":{"remote_ip":"10.0.0.2","client_ip":"203.0.113.9","method":"GET","host":"situs.test","uri":"/wp-login.php?x=1","headers":{}},"duration":0.0123,"size":512,"status":200}"#;
+        assert_eq!(
+            caddy_log("caddy", access).as_deref(),
+            Some("[akses] 203.0.113.9 GET /wp-login.php?x=1 200 12 ms")
+        );
+        let stderr = r#"{"level":"warn","logger":"http.handlers.reverse_proxy.fastcgi","msg":"stderr","body":"PHP Warning: x\nbaris dua"}"#;
+        assert_eq!(
+            caddy_log("caddy", stderr).as_deref(),
+            Some("[php-cgi] PHP Warning: x\n[php-cgi] baris dua")
+        );
+        assert_eq!(
+            caddy_log("caddy", "bukan json").as_deref(),
+            Some("[caddy] bukan json")
+        );
+    }
 }

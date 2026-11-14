@@ -175,12 +175,16 @@ pub fn serve(o: Opts) -> Result<(), String> {
             name: w.name.clone(),
             run: w.run.clone(),
             log: plain_log,
+            overlap: false,
         })
         .collect();
-    // Penjadwal Laravel menggantikan baris cron `* * * * * php artisan schedule:run`. Di mode
-    // dev ia diam kecuali diminta: tugas terjadwal tidak boleh jalan sendiri di laptop.
-    let schedule = match (project.kind, settings.scheduler) {
-        (Kind::Laravel, on) if on.unwrap_or(!dev) => Some(Task {
+    // Penjadwal menggantikan baris cron sistem. Di mode dev ia diam kecuali diminta: tugas
+    // terjadwal tidak boleh jalan sendiri di laptop.
+    let wanted = settings.scheduler.unwrap_or(!dev);
+    let wp_cron = project.dir.join("wp-cron.php").is_file();
+    let schedule = match project.kind {
+        // Pengganti `* * * * * php artisan schedule:run`.
+        Kind::Laravel if wanted => Some(Task {
             name: "schedule".into(),
             run: "php artisan schedule:run".into(),
             // Tiap menit Laravel melapor bahwa tidak ada yang perlu dijalankan; itu bukan berita.
@@ -188,10 +192,23 @@ pub fn serve(o: Opts) -> Result<(), String> {
                 (!line.contains("No scheduled commands are ready to run"))
                     .then(|| format!("[{name}] {line}"))
             },
+            overlap: true,
         }),
-        (Kind::Laravel, _) | (_, None | Some(false)) => None,
-        (_, Some(true)) => {
-            say!("jamu: scheduler = true diabaikan: penjadwal baru tersedia untuk Laravel");
+        // Tanpa ini wp-cron hanya jalan saat ada pengunjung: tulisan terjadwal di situs sepi
+        // terlambat terbit, dan berkas cache yang kedaluwarsa tidak dibuang. Menjalankan
+        // dua sekaligus tidak ada gunanya, jadi yang baru menunggu yang lama selesai.
+        Kind::WordPress if wanted && wp_cron => Some(Task {
+            name: "schedule".into(),
+            run: "php wp-cron.php".into(),
+            log: plain_log,
+            overlap: false,
+        }),
+        _ => {
+            if settings.scheduler == Some(true) {
+                say!(
+                    "jamu: scheduler = true diabaikan: penjadwal hanya untuk Laravel dan WordPress"
+                );
+            }
             None
         }
     };
@@ -240,8 +257,8 @@ pub fn serve(o: Opts) -> Result<(), String> {
     for w in &plan.workers {
         say!("jamu: pekerja {}: {}", w.name, w.run);
     }
-    if plan.schedule.is_some() {
-        say!("jamu: penjadwal Laravel aktif (schedule:run tiap menit)");
+    if let Some(task) = &plan.schedule {
+        say!("jamu: penjadwal aktif ({} tiap menit)", task.run);
     }
     warn_unwritable(&project);
 

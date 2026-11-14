@@ -26,6 +26,9 @@ mv "$sites"/wordpress "$sites"/wp
 curl -fsSL -o "$unduh"/sqlite.zip https://downloads.wordpress.org/plugin/sqlite-database-integration.zip
 unzip -q "$unduh"/sqlite.zip -d "$sites"/wp/wp-content/plugins
 cp "$sites"/wp/wp-content/plugins/sqlite-database-integration/db.copy "$sites"/wp/wp-content/db.php
+# Plugin cache yang berkasnya disajikan jamu langsung dari Caddy.
+curl -fsSL -o "$unduh"/wpsc.zip https://downloads.wordpress.org/plugin/wp-super-cache.zip
+unzip -q "$unduh"/wpsc.zip -d "$sites"/wp/wp-content/plugins
 cat > "$sites"/wp/wp-config.php <<'EOF'
 <?php
 define( 'DB_NAME', 'wp' );
@@ -52,5 +55,5 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 require_once ABSPATH . 'wp-settings.php';
 EOF
-rm -f "$unduh"/wp.zip "$unduh"/sqlite.zip
+rm -f "$unduh"/wp.zip "$unduh"/sqlite.zip "$unduh"/wpsc.zip
 rmdir "$unduh"

@@ -32,6 +32,8 @@ pub struct Task {
     pub name: String,
     pub run: String,
     pub log: LogLine,
+    /// Tugas terjadwal saja: boleh dijalankan lagi selagi yang sebelumnya belum selesai.
+    pub overlap: bool,
 }
 
 pub struct Plan {
@@ -240,6 +242,70 @@ fn q(p: &Path) -> String {
     format!("\"{}\"", s.replace('"', "\\\""))
 }
 
+/// Cookie yang menandai pengunjung yang dikenal WordPress: masuk log, pernah berkomentar,
+/// atau membuka tulisan bersandi. Mereka tidak boleh menerima halaman cache.
+const WP_KNOWN_VISITOR: &str =
+    "(comment_author|wordpress_[a-f0-9]+|wp-postpass|wordpress_logged_in)";
+
+/// Aturan berkas cache WP Super Cache: halaman yang sudah dibuat plugin disajikan Caddy tanpa
+/// menyentuh PHP, sehingga tetap terjawab saat PHP kebanjiran. Tidak ada cache yang dibangun
+/// di sini; plugin tetap yang membuat dan membuang berkasnya. Syaratnya sama dengan aturan
+/// .htaccess buatan plugin. Mengembalikan pencocok (tingkat situs) dan isi `route`.
+fn wp_cache_rule(o: &Opts) -> (String, String) {
+    // Plugin menyimpan halaman HTTPS dan HTTP di berkas terpisah.
+    let from_proxy = "header X-Forwarded-Proto https\n\t\tremote_ip private_ranges";
+    let variants: Vec<(&str, &str, String)> = if o.behind_proxy {
+        vec![
+            (
+                "wpsc_https",
+                "index-https.html",
+                format!("\t\t{from_proxy}\n"),
+            ),
+            (
+                "wpsc_http",
+                "index.html",
+                format!(
+                    "\t\tnot {{\n\t\t\t{}\n\t\t}}\n",
+                    from_proxy.replace("\t\t", "\t\t\t")
+                ),
+            ),
+        ]
+    } else if o.domain.is_some() {
+        vec![
+            (
+                "wpsc_https",
+                "index-https.html",
+                "\t\tprotocol https\n".into(),
+            ),
+            ("wpsc_http", "index.html", "\t\tprotocol http\n".into()),
+        ]
+    } else {
+        vec![("wpsc_http", "index.html", String::new())]
+    };
+    // Bila folder plugin dihapus tanpa dinonaktifkan, berkas cache tertinggal dan tidak ada
+    // lagi yang membuangnya. Karena itu aturan hanya berlaku selama berkas plugin masih ada.
+    let mut matchers = String::from(
+        "\t@wpsc_plugin file /wp-content/plugins/wp-super-cache/wp-cache-phase1.php\n",
+    );
+    let mut route = String::from("\t\troute @wpsc_plugin {\n");
+    for (name, file, scheme) in variants {
+        // Nama host ikut menjadi nama folder, jadi hanya bentuk yang lazim yang diterima.
+        matchers += &format!(
+            "\t@{name} {{\n\t\tmethod GET HEAD\n\t\tpath */\n\t\tnot path_regexp //\n\
+             \t\texpression `{{http.request.uri.query}} == \"\" && {{http.request.host}}.matches(\"^[a-z0-9-]+(\\\\.[a-z0-9-]+)*$\")`\n\
+             \t\tnot header_regexp Cookie {WP_KNOWN_VISITOR}\n{scheme}\
+             \t\tfile /wp-content/cache/supercache/{{host}}{{path}}{file}\n\t}}\n"
+        );
+        route += &format!(
+            "\t\t\theader @{name} Cache-Control \"max-age=3, must-revalidate\"\n\
+             \t\t\theader @{name} Vary \"Accept-Encoding, Cookie\"\n\
+             \t\t\trewrite @{name} {{file_match.relative}}\n"
+        );
+    }
+    route += "\t\t}\n";
+    (matchers, route)
+}
+
 pub fn caddyfile(p: &Project, o: &Opts, port: u16, state: &Path, php: &Php) -> String {
     let mut s = String::from("{\n\tadmin off\n\tpersist_config off\n");
     s += &format!("\tstorage file_system {}\n", q(&state.join("caddy")));
@@ -280,9 +346,27 @@ pub fn caddyfile(p: &Project, o: &Opts, port: u16, state: &Path, php: &Php) -> S
     }
     s += &format!("\troot * {}\n", q(&p.root));
     s += "\trequest_body {\n\t\tmax_size 128MB\n\t}\n";
+    // Log akses, satu baris JSON per permintaan. jamu meringkasnya menjadi satu baris pendek.
+    s += "\tlog {\n\t\toutput stderr\n\t\tformat json\n\t}\n";
     // Urutan penanganan ditulis terang-terangan di dalam `route`, tidak diserahkan ke urutan
     // bawaan Caddy: tolak dulu, lalu PHP, lalu berkas statis.
     let mut route = String::new();
+    if p.wp_subdir_multisite {
+        // Padanan aturan .htaccess yang dibuat WordPress untuk multisite subdirektori: awalan
+        // nama situs (`/toko/wp-admin/...`) dibuang bila berkasnya tidak ada di path itu.
+        // Ditaruh paling depan, supaya aturan tolak di bawah memeriksa path sesudah ditulis ulang.
+        s += "\t@ms_admin path_regexp ^/[_0-9a-zA-Z-]+/wp-admin$\n";
+        route += "\t\tredir @ms_admin {path}/ 301\n";
+        for (name, pattern) in [
+            ("ms_files", "(/wp-(content|admin|includes).*)"),
+            ("ms_php", "(/.*\\.php)$"),
+        ] {
+            s += &format!(
+                "\t@{name} {{\n\t\tpath_regexp {name} ^/[_0-9a-zA-Z-]+{pattern}\n\t\tnot file {{path}} {{path}}/\n\t}}\n"
+            );
+            route += &format!("\t\trewrite @{name} {{re.{name}.1}}\n");
+        }
+    }
     // Dotfile (.env, .git, .htaccess) tidak pernah disajikan, kecuali .well-known.
     s += "\t@hidden {\n\t\tpath_regexp (^|/)\\.\n\t\tnot path /.well-known/*\n\t}\n";
     route += "\t\trespond @hidden 404\n";
@@ -306,10 +390,17 @@ pub fn caddyfile(p: &Project, o: &Opts, port: u16, state: &Path, php: &Php) -> S
     };
     if let Php::Fpm { .. } = php {
         s += &format!("\t@ping {{\n\t\tpath {PING_PATH}\n\t\tremote_ip 127.0.0.1 ::1\n\t}}\n");
+        // Pemeriksaan kesehatan datang tiap beberapa detik; tidak perlu memenuhi log akses.
+        route += "\t\tlog_skip @ping\n";
         // php-fpm mengenali ping dari SCRIPT_NAME; tanpa split_path Caddy mengirimnya kosong.
         route += &format!(
             "\t\treverse_proxy @ping {upstream} {{\n\t\t\ttransport fastcgi {{\n\t\t\t\tenv SCRIPT_NAME {PING_PATH}\n\t\t\t\tenv SCRIPT_FILENAME {PING_PATH}\n\t\t\t}}\n\t\t}}\n"
         );
+    }
+    if p.kind == Kind::WordPress {
+        let (matchers, rule) = wp_cache_rule(o);
+        s += &matchers;
+        route += &rule;
     }
     // flush_interval -1: keluaran PHP diteruskan saat itu juga, tidak ditampung dulu.
     // Tanpa ini respons yang dialirkan (SSE, unduhan yang dibangkitkan) baru tiba setelah selesai.
@@ -376,6 +467,83 @@ mod tests {
         assert!(text.contains("auto_https off"));
         assert!(text.contains("respond @hidden 404"));
         assert!(text.contains("respond @uploads_php 403"));
+    }
+
+    #[test]
+    fn caddyfile_wordpress_menyajikan_berkas_cache_plugin_sebelum_php() {
+        let dir = project(&["wp-load.php", "index.php"]);
+        let text = |o: Opts| caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), &fpm());
+        let opts = || Opts {
+            dir: dir.clone(),
+            ..Default::default()
+        };
+
+        // Dev: hanya HTTP, jadi hanya varian index.html.
+        let dev = text(opts());
+        assert!(dev.contains("{host}{path}index.html"));
+        assert!(!dev.contains("index-https.html"));
+        // Hanya selama berkas plugin ada, sesudah aturan tolak, sebelum PHP.
+        let at = |needle: &str| dev.find(needle).expect(needle);
+        assert!(at("respond @uploads_php 403") < at("route @wpsc_plugin {"));
+        assert!(at("route @wpsc_plugin {") < at("php_fastcgi"));
+        assert!(dev.contains("not header_regexp Cookie (comment_author|"));
+
+        // Di belakang proxy: HTTPS dikenali dari proxy yang dipercaya.
+        let proxy = text(Opts {
+            behind_proxy: true,
+            ..opts()
+        });
+        assert!(proxy.contains("{host}{path}index-https.html"));
+        assert!(proxy.contains("{host}{path}index.html"));
+        assert!(
+            proxy.contains("@wpsc_https {") && proxy.contains("header X-Forwarded-Proto https")
+        );
+
+        // Mode domain: HTTPS dikenali dari koneksinya sendiri.
+        let domain = text(Opts {
+            domain: Some("situs.test".into()),
+            ..opts()
+        });
+        assert!(domain.contains("protocol https") && domain.contains("protocol http\n"));
+
+        // Bukan WordPress: tidak ada aturan cache.
+        let plain = project(&["index.php"]);
+        let other = caddyfile(&detect(&plain), &opts(), 8080, Path::new("/s"), &fpm());
+        assert!(!other.contains("wpsc"));
+    }
+
+    #[test]
+    fn caddyfile_multisite_subdirektori_menulis_ulang_sebelum_aturan_tolak() {
+        let dir = project(&["wp-load.php", "index.php"]);
+        let o = Opts {
+            dir: dir.clone(),
+            ..Default::default()
+        };
+        let single = caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), &fpm());
+        assert!(!single.contains("@ms_"));
+
+        std::fs::write(
+            dir.join("wp-config.php"),
+            "<?php\ndefine('MULTISITE', true);\n",
+        )
+        .unwrap();
+        let text = caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), &fpm());
+        let at = |needle: &str| text.find(needle).expect(needle);
+        assert!(at("route {") < at("rewrite @ms_files {re.ms_files.1}"));
+        assert!(at("rewrite @ms_php {re.ms_php.1}") < at("respond @hidden 404"));
+        assert!(at("rewrite @ms_php {re.ms_php.1}") < at("respond @uploads_php 403"));
+    }
+
+    #[test]
+    fn caddyfile_mencatat_akses_kecuali_pemeriksaan_kesehatan() {
+        let dir = project(&["index.php"]);
+        let o = Opts {
+            dir: dir.clone(),
+            ..Default::default()
+        };
+        let text = caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), &fpm());
+        assert!(text.contains("output stderr"));
+        assert!(text.contains("log_skip @ping"));
     }
 
     #[test]
