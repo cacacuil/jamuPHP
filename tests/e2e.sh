@@ -739,7 +739,8 @@ grup_mail() {
   cat > "$s1/kirim.php" <<'EOF'
 <?php
 $kepala = isset($_GET['dari']) ? "From: Toko <{$_GET['dari']}>" : '';
-var_dump(mail('tujuan@contoh.test', 'Uji jamu', "baris satu\n.\nbaris tiga", $kepala, $_GET['param'] ?? ''));
+// Bukan var_dump: dengan Xdebug terpasang keluarannya berupa HTML.
+echo mail('tujuan@contoh.test', 'Uji jamu', "baris satu\n.\nbaris tiga", $kepala, $_GET['param'] ?? '') ? 'terkirim' : 'ditolak';
 EOF
   cp "$s1/kirim.php" "$s2/kirim.php"
   printf '%s\n' '<?php echo ini_get("sendmail_path");' > "$s1/jalur.php"
@@ -765,7 +766,7 @@ EOF
 
   start_jamu "$s1" 8141 "$log" || { cek "start dengan relay" gagal ok; kill $SP; akhir_grup "$log"; return; }
   cek "relay disebut saat menyala" "$(has "$(cat "$log")" "mail() diteruskan ke 127.0.0.1:$smtp")" yes
-  cek "mail() berhasil" "$(cu "$B/kirim.php?dari=toko@situs.test")" 'bool(true)'
+  cek "mail() berhasil" "$(cu "$B/kirim.php?dari=toko@situs.test")" terkirim
   cek "pengirim amplop dari header From" "$(grep -c '^MAIL FROM:<toko@situs.test>' "$kotak")" 1 "$(cat "$kotak")"
   cek "penerima sampai ke relay" "$(grep -c '^RCPT TO:<tujuan@contoh.test>' "$kotak")" 1
   cek "judul sampai ke relay" "$(grep -c '^| Subject: Uji jamu' "$kotak")" 1
@@ -774,31 +775,31 @@ EOF
   sleep 0.3
   cek "pengiriman tercatat di log" "$(grep -c 'email ke tujuan@contoh.test diteruskan' "$log")" 1 "$(tail -5 "$log")"
 
-  cek "mail() dengan -f" "$(cu "$B/kirim.php?dari=toko@situs.test&param=-fpantul@situs.test")" 'bool(true)'
+  cek "mail() dengan -f" "$(cu "$B/kirim.php?dari=toko@situs.test&param=-fpantul@situs.test")" terkirim
   cek "-f menjadi pengirim amplop" "$(grep -c '^MAIL FROM:<pantul@situs.test>' "$kotak")" 1
   # Parameter kelima mail() adalah celah lama: opsi selain -f tidak boleh sampai ke msmtp.
   r=$(cu -G "$B/kirim.php" --data-urlencode "dari=toko@situs.test" \
     --data-urlencode "param=-fa@situs.test -X$work/bocor.log -C$work/bocor.conf --host=10.0.0.1")
-  cek "parameter liar: email tetap terkirim" "$r" 'bool(true)'
+  cek "parameter liar: email tetap terkirim" "$r" terkirim
   cek "parameter liar: -f dipakai" "$(grep -c '^MAIL FROM:<a@situs.test>' "$kotak")" 1
   cek "parameter liar: tidak ada berkas tertulis" "$(ya test -e "$work/bocor.log")" no
   r=$(cu -G "$B/kirim.php" --data-urlencode "dari=toko@situs.test" --data-urlencode "param=-f-oQ/tmp")
-  cek "pengirim -f yang aneh diabaikan" "$r" 'bool(true)'
+  cek "pengirim -f yang aneh diabaikan" "$r" terkirim
   cek "pengirim -f yang aneh: memakai header From" "$(grep -c '^MAIL FROM:<toko@situs.test>' "$kotak")" 2
 
   n=$(grep -c '^SELESAI' "$kotak")
-  cek "tanpa pengirim: mail() gagal" "$(cu "$B/kirim.php")" 'bool(false)'
+  cek "tanpa pengirim: mail() gagal" "$(cu "$B/kirim.php")" ditolak
   cek "tanpa pengirim: tidak ada yang dikirim" "$(grep -c '^SELESAI' "$kotak")" "$n"
   sleep 0.3
   cek "tanpa pengirim: sebabnya di log" "$(has "$(cat "$log")" 'tidak punya pengirim')" yes "$(tail -5 "$log")"
   stop_jamu
 
   # PHP di baris perintah (pekerja, penjadwal, jamu php) memakai jalur yang sama.
-  r=$(cd "$s1" && "$JAMU" php -r 'var_dump(mail("cli@contoh.test", "dari cli", "isi", "From: cli@situs.test"));' 2>&1)
-  cek "jamu php: mail() berhasil" "$(has "$r" 'bool(true)')" yes "$r"
+  r=$(cd "$s1" && "$JAMU" php -r 'echo mail("cli@contoh.test", "dari cli", "isi", "From: cli@situs.test") ? "terkirim" : "ditolak";' 2>&1)
+  cek "jamu php: mail() berhasil" "$(has "$r" terkirim)" yes "$r"
   cek "jamu php: sampai ke relay" "$(grep -c '^RCPT TO:<cli@contoh.test>' "$kotak")" 1
-  r=$(cd "$s1" && JAMU_SMTP_PORT=8143 "$JAMU" php -r 'var_dump(mail("cli@contoh.test", "dari cli", "isi", "From: cli@situs.test"));' 2>&1)
-  cek "relay mati: mail() gagal" "$(has "$r" 'bool(false)')" yes "$r"
+  r=$(cd "$s1" && JAMU_SMTP_PORT=8143 "$JAMU" php -r 'echo mail("cli@contoh.test", "dari cli", "isi", "From: cli@situs.test") ? "terkirim" : "ditolak";' 2>&1)
+  cek "relay mati: mail() gagal" "$(has "$r" ditolak)" yes "$r"
   cek "relay mati: sebabnya disebut" "$(has "$r" 'email ke cli@contoh.test gagal: cannot connect')" yes "$r"
 
   # jamu check ikut memeriksa relay.
@@ -814,13 +815,13 @@ EOF
   # Pengirim bawaan dan batas laju per jam.
   JAMU_MAIL_FROM=bawaan@situs.test JAMU_MAIL_LIMIT=2 start_jamu "$s2" 8141 "$log" \
     || { cek "start dengan batas" gagal ok; kill $SP; akhir_grup "$log"; return; }
-  cek "pengirim bawaan: mail() berhasil" "$(cu "$B/kirim.php")" 'bool(true)'
+  cek "pengirim bawaan: mail() berhasil" "$(cu "$B/kirim.php")" terkirim
   cek "pengirim bawaan dipakai" "$(grep -c '^MAIL FROM:<bawaan@situs.test>' "$kotak")" 1 "$(cat "$kotak")"
   cek "pengirim bawaan menjadi header From" "$(grep -c '^| From: bawaan@situs.test' "$kotak")" 1
-  cek "email kedua masih boleh" "$(cu "$B/kirim.php?dari=toko@situs.test")" 'bool(true)'
+  cek "email kedua masih boleh" "$(cu "$B/kirim.php?dari=toko@situs.test")" terkirim
   n=$(grep -c '^SELESAI' "$kotak")
-  cek "email ketiga ditolak" "$(cu "$B/kirim.php?dari=toko@situs.test")" 'bool(false)'
-  cek "email keempat ditolak" "$(cu "$B/kirim.php?dari=toko@situs.test")" 'bool(false)'
+  cek "email ketiga ditolak" "$(cu "$B/kirim.php?dari=toko@situs.test")" ditolak
+  cek "email keempat ditolak" "$(cu "$B/kirim.php?dari=toko@situs.test")" ditolak
   cek "yang ditolak tidak sampai ke relay" "$(grep -c '^SELESAI' "$kotak")" "$n"
   sleep 0.3
   cek "batas tercapai: satu baris di log, bukan satu per email" "$(grep -c 'batas 2 email per jam' "$log")" 1 "$(tail -5 "$log")"

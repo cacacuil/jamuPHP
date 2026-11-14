@@ -41,8 +41,8 @@ docker run --rm --entrypoint sh "$image" -c 'mkdir /tmp/p && cd /tmp/p \
 # Relay sengaja tidak ada, jadi yang diharapkan adalah kegagalan dengan alasan dari msmtp.
 surat=$(docker run --rm -w /tmp --entrypoint jamu \
   -e JAMU_SMTP_HOST=127.0.0.1 -e JAMU_SMTP_PORT=9 -e JAMU_SMTP_TLS=off "$image" \
-  php -r 'var_dump(mail("a@contoh.test", "uji", "isi", "From: b@contoh.test"));' 2>&1 || true)
-[[ $surat == *"gagal: cannot connect"* && $surat == *"bool(false)"* ]] || fail "mode teruskan email: $surat"
+  php -r 'echo mail("a@contoh.test", "uji", "isi", "From: b@contoh.test") ? "terkirim" : "ditolak";' 2>&1 || true)
+[[ $surat == *"gagal: cannot connect"* && $surat == *ditolak ]] || fail "mode teruskan email: $surat"
 
 body=$(get "$url/")
 [[ $body == https=tidak* ]] || fail "halaman utama: $body"
