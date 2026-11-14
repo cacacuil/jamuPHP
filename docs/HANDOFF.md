@@ -1,6 +1,6 @@
 # JamuPHP: handoff v2
 
-Tanggal: 13 November 2026, revisi 9. Menggantikan handoff v1 ("XAMPP berbasis Rust").
+Tanggal: 14 November 2026, revisi 10. Menggantikan handoff v1 ("XAMPP berbasis Rust").
 Nama produk: JamuPHP. Perintahnya `jamu`, file config-nya `jamu.toml`. Repositori:
 https://github.com/cacacuil/jamuphp (lisensi AGPL-3.0).
 
@@ -25,6 +25,10 @@ proxy, dan cara menangani extension PHP.
 Perubahan di revisi 9: spike S2 dikerjakan dan lulus (bagian 18): `jamu` yang sama berjalan
 di Windows dengan Caddy dan `php-cgi` dari zip resmi. Rencana "pool php-cgi buatan sendiri"
 dibatalkan karena `php-cgi` ternyata sudah mengurus pekerjanya sendiri di Windows.
+Perubahan di revisi 10: spike S4 dikerjakan (bagian 19): pengukuran diulang tiga kali jalan
+dengan MariaDB dan WP Super Cache di image `jamuphp`. Cache halaman tingkat platform
+(jalur negatif H7) diganti rekomendasi yang lebih kecil: aturan Caddy yang menyajikan
+berkas cache buatan plugin.
 
 ## 1. Inti dalam satu menit
 
@@ -345,6 +349,12 @@ yang sama. SQLite lewat lapisan penerjemah lebih lambat dari MySQL, jadi angka d
 absolutnya rendah; urutan antar susunan yang bisa dipegang, bukan angka absolutnya.
 Memori Caddy bisa ditekan lewat pengaturan runtime Go dan itu tidak dicoba. Worker mode
 tidak diukur karena WordPress tidak bisa memakainya. OpenLiteSpeed tidak diukur.
+
+Diukur ulang di S4 (bagian 19) dengan MariaDB, cache halaman dari plugin, dan tiga kali
+jalan. Satu dugaan di atas terkoreksi di sana: MariaDB hanya 11-15% lebih cepat dari
+SQLite, jadi angka dinamis yang rendah bukan karena SQLite. Angka statis dan cache di
+tabel ini juga tidak bisa dibandingkan langsung dengan bagian 19, karena di sini
+permintaan lewat port yang dipublikasikan Docker dan di sana langsung ke IP container.
 
 Rekomendasi pada titik ini (revisi 4) adalah Apache event + php-fpm ondemand. Rekomendasi
 itu digantikan setelah syarat SSL bawaan dan uji konkurensi; lihat "Konkurensi" di bawah.
@@ -751,7 +761,10 @@ Yang bertanda (!) paling sering menimpa pemula atau paling mahal akibatnya.
 | H4 (!) | Apache dipakai sebagai server terdepan dengan pengaturan bawaan | Saat PHP kebanjiran, halaman cache dan file statis ikut berhenti (terukur 0 req/dtk) | Apache hanya di belakang Caddy. Bila tetap dipakai di depan, jumlah thread harus jauh di atas batas antrean PHP. |
 | H5 | Ribuan koneksi terbuka bersamaan | Memori Caddy naik (terukur 248 MB pada 4.000 koneksi) | Batas memori dan batas koneksi dipasang; penggunaan tampil di dashboard. |
 | H6 | Klien lambat menahan koneksi tanpa mengirim apa-apa | Slot koneksi habis | Batas waktu baca header dan body. |
-| H7 | Plugin cache tidak terpasang atau salah atur | Setiap pengunjung menjalankan PHP | Cache halaman disediakan platform, bukan diserahkan ke plugin. |
+| H7 | Plugin cache tidak terpasang atau salah atur | Setiap pengunjung menjalankan PHP | Direvisi di bagian 19: platform tidak membuat cache sendiri. Plugin cache dipasang oleh hosting saat situs dibuat, dan `jamu` menyajikan berkas cache buatan plugin langsung dari Caddy. |
+| H8 (!) | PHP kebanjiran permintaan yang tidak bisa di-cache (tebak sandi di `wp-login.php`, bot dengan query acak), plugin cache dalam mode yang menyajikan lewat PHP | Halaman yang sudah di-cache ikut antre di belakang banjir; terukur 0,5 req/dtk dengan waktu tunggu 12 detik | Berkas cache disajikan Caddy tanpa menyentuh PHP; terukur 4.800 req/dtk pada banjir yang sama. |
+| H9 (!) | Folder plugin cache dihapus tanpa dinonaktifkan, sementara berkas cache masih ada | Dengan aturan berkas cache, Caddy terus menyajikan halaman basi tanpa batas waktu (terukur). Tanpa aturan, WordPress kembali menyajikan halaman segar. | Aturan hanya berlaku selama berkas plugin masih ada di tempatnya; belum dibuat. |
+| H10 | Situs HTTPS di belakang proxy, aturan cache hanya mengenal `index.html` | Plugin menyimpan halaman HTTPS di `index-https.html`: aturan tidak pernah kena, atau menyajikan varian HTTP ke pengunjung HTTPS | Dua aturan, satu per skema (sudah di kandidat aturan, teruji). |
 
 ## 10. Roadmap dan syarat lulus
 
@@ -763,7 +776,8 @@ Ukuran: K kecil, S sedang, B besar. Ini perkiraan kasar, bukan janji waktu.
   sertifikat dari staging Let's Encrypt pada domain sungguhan.
 - S2: hal yang sama di Windows dengan Caddy dan pool php-cgi dari zip resmi.
 - S3: image `php:*-fpm` + binary sebagai PID 1, satu situs sungguhan di Dokploy.
-- S4: ulangi pengukuran bagian 5 dengan MySQL dan plugin cache halaman, tiga kali jalan.
+- S4: ulangi pengukuran bagian 5 dengan MySQL dan plugin cache halaman, tiga kali jalan
+  (sudah, bagian 19).
   Hanya bila owner memilih server sendiri: `.htaccess` untuk empat kasus (WordPress,
   Laravel, blok tolak Contact Form 7, aturan WP Super Cache), diuji diferensial terhadap
   Apache.
@@ -863,12 +877,14 @@ lihat bagian 5.
 - Build Redis atau Valkey untuk Windows yang sehat dan lisensinya cocok.
 - Apache di Windows: build berasal dari pihak ketiga, dan cara terbaik menyambungkannya
   ke pool php-cgi (mod_fcgid atau mod_proxy_fcgi) belum diuji.
-- Pengukuran bagian 5 belum diulang dan belum memakai MySQL.
+- Pengukuran bagian 5 sudah diulang dengan MariaDB (bagian 19), tetapi hanya untuk
+  susunan yang dipilih dan nginx sebagai patokan, di mesin yang sama dengan `wrk`.
 - Konkurensi diukur dengan beban jenuh; uji dengan laju tetap di bawah titik jenuh belum
   dilakukan. HTTP/2, HTTP/3, dan nginx lewat HTTPS belum diukur.
 - Cara membatasi antrean PHP per situs di Caddy (dan jawaban 503 cepat) belum diuji.
-- Cache halaman tingkat platform untuk Caddy: modul mana, dan aturan pengecualian untuk
-  pengguna login dan keranjang belanja.
+- Cache halaman tingkat platform untuk Caddy tidak lagi direncanakan (bagian 19). Yang
+  belum: aturan berkas cache untuk plugin selain WP Super Cache, dan cookie keranjang
+  belanja WooCommerce.
 - SSL diuji terhadap CA ACME lokal, belum terhadap Let's Encrypt dengan domain sungguhan.
 - Batas laju Let's Encrypt saat ini (jumlah sertifikat per domain terdaftar, kegagalan
   validasi per jam) belum dicek ulang di sesi ini.
@@ -947,7 +963,7 @@ Satu file Rust (`src/main.rs`, sekitar 590 baris termasuk tes) dengan tiga depen
    staging Let's Encrypt, sebagai pengguna non-root.
 2. S3: sudah dikerjakan, lihat bagian 17. Sisanya adalah deploy di Dokploy sungguhan.
 3. S2: sudah dikerjakan, lihat bagian 18.
-4. S4: ulangi pengukuran dengan MySQL dan cache halaman.
+4. S4: sudah dikerjakan, lihat bagian 19.
 
 Kode spike boleh dibuang. Yang dibawa ke fase 1 adalah aturan deteksi, isi konfigurasi
 Caddy dan php-fpm, serta empat temuan di atas sebagai tes.
@@ -1068,7 +1084,7 @@ Horizon tidak jalan di sana.
 ### Langkah berikutnya
 
 1. Deploy satu situs di Dokploy dari image GHCR. Port container: 8080.
-2. S2 sudah dikerjakan (bagian 18). Sisanya S4 (ukur ulang dengan MySQL dan cache halaman).
+2. S2 sudah dikerjakan (bagian 18) dan S4 juga (bagian 19).
 
 ## 18. Hasil spike S2: Windows
 
@@ -1207,8 +1223,200 @@ terbukti bahwa tanpa itu bisa dieksploitasi.
    dari run CI terakhir, ekstrak, lalu `jamu.exe serve C:\path\ke\project`. Yang perlu
    dilihat: dialog firewall, antivirus, dan Ctrl-C.
 2. Sisa S3 (deploy di Dokploy) dan sisa S1 (domain sungguhan).
-3. S4: ukur ulang dengan MySQL dan cache halaman. Setelah itu keempat spike selesai dan
-   fase 1 bisa dimulai.
+3. S4 sudah dikerjakan (bagian 19).
+
+## 19. Hasil spike S4: MariaDB dan cache halaman
+
+### Yang dibuat
+
+Semuanya di `docs/benchmark/`, tidak ada perubahan pada `jamu`:
+
+- `s4-setup.sh` menyiapkan MariaDB 11 dan dua salinan WordPress yang isinya sama, satu
+  memakai MariaDB dan satu SQLite. `s4-seed.php` mengisinya dengan 20 tulisan.
+- `s4-cache.php` menyalakan dan mematikan WP Super Cache tanpa membuka wp-admin.
+- `s4.sh` menjalankan semua beban, tiap beban tiga kali 15 detik setelah pemanasan 5 detik.
+- `s4-supercache.caddy` adalah kandidat aturan Caddy untuk menyajikan berkas cache.
+  `s4-nginx.conf` adalah nginx pembanding.
+- `s4-results.txt` berisi satu baris per jalan; `s4-ringkas.sh` menghitung mediannya.
+
+### Cara ukur
+
+- Yang diukur adalah image `jamuphp:8.4` apa adanya: Caddy 2.11.9, PHP 8.4.27 dengan
+  `php.ini-production` (OPcache aktif dan memeriksa perubahan berkas), php-fpm ondemand
+  dengan 4 pekerja, yaitu angka yang dihitung `jamu` dari jatah 2 core.
+- MariaDB 11.8.9 dengan konfigurasi bawaan image, di 2 core yang sama dengan server web,
+  seperti VPS kecil yang menjalankan keduanya.
+- WordPress 7.2-beta, tema bawaan, 21 tulisan. Beranda 126 KB. WP Super Cache 3.1.5 dengan
+  setelan yang disarankan plugin: mode "Simple" dan tanpa cache untuk pengunjung yang
+  dikenal. Mode "Expert" tidak dipakai karena bergantung pada `.htaccess`.
+- `wrk` 4.1.0 di 2 core lain, 8 koneksi kecuali disebut lain, langsung ke IP container.
+- Tiga pintu masuk ke php-fpm yang sama di container `jamu`, supaya selisihnya hanya
+  berasal dari lapisan web: **J** `jamu` apa adanya; **C** Caddyfile buatan `jamu`
+  ditambah aturan cache; **N** nginx 1.31.8.
+- Sebelum tiap beban, satu permintaan diperiksa: kode jawaban, ukuran, kompresi, dan ada
+  tidaknya penanda cache. Tidak ada jawaban selain 200 dan tidak ada galat soket di semua
+  jalan.
+
+Yang sengaja tidak diulang: Apache dan FrankenPHP. Owner sudah memutuskan Caddy, jadi
+keduanya tidak lagi mengubah keputusan apa pun. nginx tinggal sebagai patokan. Angka di
+sini juga tidak bisa dijajarkan dengan tabel bagian 5: versi PHP, ukuran halaman, dan
+jalur jaringannya berbeda. Karena itu SQLite diukur ulang dengan cara yang sama.
+
+### Hasil
+
+Median tiga jalan, req/dtk; dalam kurung nilai terendah dan tertinggi.
+
+| Beban | J: `jamu` apa adanya | C: `jamu` + aturan cache | N: nginx |
+|---|---|---|---|
+| Halaman dinamis, MariaDB | 25,6 (25,1-25,7) | - | 24,6 (24,6-24,9) |
+| Halaman dinamis, SQLite | 22,2 (21,9-22,4) | - | - |
+| Halaman dinamis, cache menyala, pengunjung ber-cookie | 25,7 (25,2-26,0) | - | - |
+| Halaman dinamis, 64 koneksi | 23,9 (21,1-25,0) | - | - |
+| Halaman cache 126 KB, disajikan PHP | 2.160 (2.077-2.180) | - | 2.963 (2.887-2.995) |
+| Halaman cache 126 KB, disajikan server web | - | 9.714 (9.597-9.749) | 52.881 (51.581-54.008) |
+| Halaman cache, header kompresi peramban | 1.260 (1.257-1.277) | 2.702 (2.610-2.703) | 1.958 (1.455-1.960) |
+| Halaman cache, 64 koneksi | 2.116 (2.041-2.253) | 10.314 (10.169-10.615) | - |
+| Halaman cache saat 300 koneksi menunggu PHP | **0,5** (0,5-0,5) | 4.846 (4.549-5.130) | 23.570 (23.135-25.035) |
+| File statis 7 KB | 17.185 (16.538-17.870) | - | 80.500 (80.277-82.252) |
+| File statis 7 KB, header kompresi peramban | 11.907 (11.877-12.237) | - | 19.307 (19.014-19.350) |
+
+Waktu tunggu (median p50): halaman dinamis 308 ms; 64 koneksi ke halaman dinamis
+2,5 detik; halaman cache lewat PHP 3,4 ms; lewat Caddy 0,7 ms; halaman cache
+lewat PHP saat PHP kebanjiran 11,5 detik.
+
+Memori (PSS):
+
+| Keadaan | PSS | Rincian |
+|---|---|---|
+| Container `jamu`, baru hidup | 54 MB | Caddy 27 MB, php-fpm 25 MB (induk dan 1 pekerja), `jamu` 2 MB |
+| Container `jamu`, sesudah beban dinamis | 112 MB | Caddy 32 MB, php-fpm 78 MB (induk dan 4 pekerja), `jamu` 1 MB |
+| Container `jamu`, 20 detik diam | 89 MB | Caddy 32 MB, php-fpm 56 MB (induk dan 2 pekerja), `jamu` 1 MB |
+| MariaDB, konfigurasi bawaan, diam | 125 MB | di luar container `jamu` |
+
+### Yang ditunjukkan angka ini
+
+1. **MariaDB hanya sedikit lebih cepat dari SQLite**: 25,6 lawan 22,2 req/dtk, selisih
+   15% (11% di jalan pertama). Dugaan di bagian 5 bahwa angka dinamis rendah karena
+   SQLite ternyata salah. Leher botolnya PHP itu sendiri:
+   sekitar 80 milidetik CPU per halaman di mesin ini, jadi 2 core memberi 25 halaman per
+   detik, apa pun databasenya.
+2. **Lapisan web tetap tidak memengaruhi halaman dinamis.** Caddy dan nginx di depan
+   php-fpm yang sama memberi angka yang sama.
+3. **Plugin cache langsung bekerja di image tanpa `.htaccess` dan tanpa pekerjaan apa pun
+   di `jamu`.** Halaman cache yang disajikan PHP 84 kali lebih cepat daripada halaman
+   dinamis. Untuk situs yang menjadi sasaran produk ini, angka itu sudah lebih dari cukup.
+4. **Menyajikan berkas cache dari Caddy memberi 4,5 kali lagi**, tetapi itu bukan
+   alasan utamanya. Alasan utamanya nomor 5.
+5. **Saat PHP kebanjiran, halaman cache yang disajikan PHP ikut mati.** Dengan 300 koneksi
+   menunggu halaman yang tidak bisa di-cache, pengunjung halaman cache menunggu 11,5
+   detik. Di dunia nyata banjir semacam ini datang dari tebak sandi di `wp-login.php`,
+   `xmlrpc.php`, dan bot yang menambahkan query acak. Dengan aturan cache di Caddy,
+   halaman cache tetap dijawab dalam 1,2 milidetik pada banjir yang sama. Membatasi
+   antrean PHP (jalur negatif H1) tidak menyelamatkan halaman cache: ia hanya membuat
+   kegagalannya cepat, karena halaman cache tetap berebut pekerja yang sama.
+6. **Untuk halaman cache yang dimampatkan, selisih Caddy dan nginx berbalik.** Peramban
+   selalu meminta kompresi, dan dua-duanya memampatkan 126 KB di setiap permintaan. Caddy
+   memilih zstd dan mengalahkan nginx dengan gzip. Angka tanpa kompresi, tempat nginx
+   lima kali lebih cepat, tidak pernah dialami pengunjung sungguhan. Ongkos terbesar
+   halaman cache sekarang adalah pemampatan berulang, bukan server web.
+7. **Memori satu situs 54 MB saat baru hidup dan 89 MB dua puluh detik setelah beban.**
+   Caddy dengan konfigurasi buatan `jamu` memakai 27-44 MB, lebih rendah dari 45-57 MB
+   di bagian 5. Memori setelah diam lama tidak diukur. MariaDB dengan
+   konfigurasi bawaan memakai 125 MB sebelum melayani apa pun, lebih besar dari seluruh
+   lapisan web. Untuk hosting banyak situs, cara berbagi MariaDB lebih menentukan memori
+   daripada pilihan server web.
+8. **Pemeriksaan kesehatan container menahan satu pekerja PHP tetap hidup.** `jamu health`
+   berjalan tiap 10 detik dan batas diam pekerja ondemand juga 10 detik, jadi selalu ada
+   minimal satu pekerja. Terlihat pada container diam: pekerja yang sama masih hidup
+   setelah 47 detik. Itu belasan MB per situs yang tidak pernah dilepas; imbalannya
+   permintaan pertama tidak perlu menunggu pekerja dibuat.
+9. **64 koneksi ke halaman dinamis tidak merobohkan apa pun**: tetap 24 req/dtk, tanpa
+   galat, tetapi tiap pengunjung menunggu 2,5 detik. Ini jalur negatif H1 yang
+   terukur ulang dengan MariaDB.
+
+### Aturan cache kandidat dan jalur negatifnya
+
+Aturannya ada di `docs/benchmark/s4-supercache.caddy`: bila permintaannya GET atau HEAD,
+tanpa query, tanpa cookie pengguna yang dikenal, dan berkas cache untuk host dan path itu
+ada, Caddy menyajikan berkasnya. Selain itu permintaan diteruskan ke PHP seperti biasa.
+Tidak ada cache yang dibangun: plugin tetap yang membuat dan menghapus berkasnya.
+
+| Permintaan lewat pintu C | Dijawab oleh |
+|---|---|
+| `GET /` dan `HEAD /` | Caddy, isi sama persis dengan `index.html` plugin |
+| `GET /` dengan `X-Forwarded-Proto: https` | Caddy, isi sama persis dengan `index-https.html` |
+| `GET /tulisan-uji-7/` yang sudah di-cache | Caddy |
+| `GET /tulisan-uji-11/` yang belum di-cache | PHP, lalu berkasnya terbentuk |
+| `GET /?x=1` | PHP |
+| `GET /` dengan cookie komentator atau `wordpress_logged_in_*` | PHP, halaman tanpa cache |
+| `POST /` | PHP |
+| Tulisan disunting | Plugin menandai berkasnya; permintaan berikutnya ke PHP dan memuat isi baru, lalu kembali ke Caddy |
+| Folder plugin dihapus tanpa dinonaktifkan | **Caddy terus menyajikan halaman lama.** Lewat pintu J, WordPress menyajikan halaman segar |
+
+Dua temuan dari uji ini:
+
+1. **Versi pertama aturan salah untuk HTTPS.** Plugin menyimpan halaman HTTPS di
+   `index-https.html`. Aturan yang hanya mengenal `index.html` tidak pernah kena di situs
+   HTTPS, yaitu semua situs production, dan pada situs campuran ia menyajikan varian HTTP
+   ke pengunjung HTTPS. Aturan sekarang ada dua, satu per skema. Pengukuran diulang penuh
+   dengan aturan yang sudah dibetulkan; angka di atas dari pengulangan itu, dan jalan
+   pertama memberi angka yang sama dalam selisih beberapa persen.
+2. **Halaman basi bila plugin dihapus paksa** (jalur negatif H9). Ini harga dari
+   melewati PHP: tidak ada lagi yang memeriksa apakah plugin masih ada. Sebelum aturan
+   ini masuk ke `jamu`, ia harus bersyarat pada keberadaan berkas plugin.
+
+### Rekomendasi
+
+Jalur negatif H7 semula berbunyi "cache halaman disediakan platform". Setelah diukur,
+saran saya: **jangan bangun cache sendiri.** Bagian yang sulit dari cache adalah tahu
+kapan halaman harus dibuang, dan plugin sudah melakukannya dengan benar dari dalam
+WordPress. Yang perlu dirakit hanya dua hal:
+
+1. **Hosting memasang plugin cache saat situs dibuat.** Ini urusan templat situs di
+   hosting, bukan urusan `jamu`. Tanpa `jamu` berbuat apa-apa, hasilnya sudah lebih dari 80 kali
+   lebih cepat.
+2. **`jamu` menulis aturan berkas cache untuk project WordPress** di fase 2 (production),
+   bukan fase 1. Alasannya nomor 5 di atas, bukan kecepatan. Syarat sebelum masuk: aturan
+   bersyarat pada berkas plugin (H9), bentuk `protocol https` untuk mode `--domain`, dan
+   tabel jalur negatif di atas menjadi tes.
+
+Yang saya sarankan ditolak: modul cache untuk Caddy (butuh build Caddy sendiri, dan
+aturan pengecualian per plugin harus ditulis ulang) dan dukungan banyak plugin cache
+sekaligus. Satu plugin yang didukung dengan benar lebih baik daripada lima yang setengah.
+
+Keputusan ini milik owner: bila ketergantungan pada tata letak berkas satu plugin
+dianggap terlalu mahal, pilihan yang jujur adalah tidak menulis aturan sama sekali dan
+menerima bahwa banjir ke PHP ikut mematikan halaman cache.
+
+### Yang belum, dan keterbatasan
+
+- `wrk` dan server berjalan di mesin yang sama, dengan 4 core. Angka absolutnya milik
+  mesin ini; yang bisa dipegang adalah perbandingannya.
+- Beban jenuh, bukan laju tetap. Satu halaman (beranda) saja yang diukur.
+- MariaDB memakai konfigurasi bawaan dan data yang sangat kecil (21 tulisan). Situs dengan
+  ribuan tulisan atau WooCommerce bisa berperilaku lain.
+- OPcache di image memeriksa perubahan berkas tiap 2 detik. Mematikannya di production
+  tidak diukur.
+- Aturan cache hanya untuk WP Super Cache. Cookie keranjang WooCommerce, varian seluler,
+  dan berkas `.gz` buatan plugin belum disentuh. Menyajikan berkas yang sudah dimampatkan
+  (`file_server` dengan `precompressed`) akan menghapus ongkos di nomor 6 dan belum dicoba.
+- Plugin membuat satu folder cache untuk setiap nilai header `Host` yang datang. Di
+  belakang proxy yang menyaring host hal itu tidak terjangkau; pada mode `--domain`
+  belum diperiksa.
+- Aturan bersyarat pada berkas plugin (H9) belum ditulis.
+- Pintu C dijalankan dengan biner Caddy yang sama tetapi di container terpisah, bukan
+  dibangkitkan oleh `jamu`. `jamu` sendiri tidak diubah di spike ini.
+- Dari bagian 5 yang tidak diulang: Apache, FrankenPHP, HTTPS, HTTP/2 dan HTTP/3, ribuan
+  koneksi diam.
+
+### Langkah berikutnya
+
+Keempat spike sudah dikerjakan. Yang masih terbuka sebelum fase 1:
+
+1. Owner mencoba rakitan Windows di Windows 10 atau 11 (bagian 18).
+2. Deploy satu situs di Dokploy dari image GHCR, dan uji `--domain` terhadap staging
+   Let's Encrypt dengan domain sungguhan (sisa S3 dan S1).
+3. Owner memutuskan soal aturan berkas cache di atas.
 
 ## Sumber
 

@@ -1,0 +1,79 @@
+S4|meta|2026-11-14T03:24:06Z|image=jamuphp:8.4|php=8.4.27 opcache=1 validate_timestamps=1|caddy=v2.11.9|mariadb=11.8.9-MariaDB-ubu2404|nginx/1.31.8|wrk debian/4.1.0-4build2|core=4|durasi=15s x 3
+S4|mem|MariaDB, baru hidup|jamu: total=54MB php-fpm=25MB/2p jamu=2MB/1p caddy=27MB/1p|mariadb=125MB
+S4|J jamu|dinamis, MariaDB|c=8|jalan=1|rps=25.15|p50=309.04ms|p99=488.20ms|non2xx=0|galat=0|cek=200,125756B,enc=,penanda_cache=0
+S4|J jamu|dinamis, MariaDB|c=8|jalan=2|rps=25.74|p50=305.15ms|p99=419.22ms|non2xx=0|galat=0|cek=200,125756B,enc=,penanda_cache=0
+S4|J jamu|dinamis, MariaDB|c=8|jalan=3|rps=25.55|p50=308.03ms|p99=421.39ms|non2xx=0|galat=0|cek=200,125756B,enc=,penanda_cache=0
+S4|mem|MariaDB, sesudah beban dinamis|jamu: total=112MB php-fpm=78MB/5p jamu=1MB/1p caddy=32MB/1p|mariadb=125MB
+S4|mem|MariaDB, 20 detik diam|jamu: total=89MB php-fpm=56MB/3p jamu=1MB/1p caddy=32MB/1p|mariadb=125MB
+S4|N nginx|dinamis, MariaDB|c=8|jalan=1|rps=24.56|p50=317.70ms|p99=472.88ms|non2xx=0|galat=0|cek=200,125804B,enc=,penanda_cache=0
+S4|N nginx|dinamis, MariaDB|c=8|jalan=2|rps=24.55|p50=317.37ms|p99=435.86ms|non2xx=0|galat=0|cek=200,125804B,enc=,penanda_cache=0
+S4|N nginx|dinamis, MariaDB|c=8|jalan=3|rps=24.89|p50=313.32ms|p99=409.68ms|non2xx=0|galat=0|cek=200,125804B,enc=,penanda_cache=0
+S4|J jamu|dinamis, MariaDB|c=64|jalan=1|rps=21.14|p50=2.50s|p99=5.00s|non2xx=0|galat=0|cek=200,125756B,enc=,penanda_cache=0
+S4|J jamu|dinamis, MariaDB|c=64|jalan=2|rps=25.04|p50=2.48s|p99=2.65s|non2xx=0|galat=0|cek=200,125756B,enc=,penanda_cache=0
+S4|J jamu|dinamis, MariaDB|c=64|jalan=3|rps=23.93|p50=2.59s|p99=2.93s|non2xx=0|galat=0|cek=200,125756B,enc=,penanda_cache=0
+S4|J jamu|statis 7 KB|c=8|jalan=1|rps=17869.58|p50=398.00us|p99=4.54ms|non2xx=0|galat=0|cek=200,6953B,enc=,penanda_cache=0
+S4|J jamu|statis 7 KB|c=8|jalan=2|rps=16537.47|p50=421.00us|p99=4.78ms|non2xx=0|galat=0|cek=200,6953B,enc=,penanda_cache=0
+S4|J jamu|statis 7 KB|c=8|jalan=3|rps=17184.82|p50=409.00us|p99=4.65ms|non2xx=0|galat=0|cek=200,6953B,enc=,penanda_cache=0
+S4|N nginx|statis 7 KB|c=8|jalan=1|rps=82251.82|p50=94.00us|p99=2.62ms|non2xx=0|galat=0|cek=200,6953B,enc=,penanda_cache=0
+S4|N nginx|statis 7 KB|c=8|jalan=2|rps=80276.91|p50=96.00us|p99=2.92ms|non2xx=0|galat=0|cek=200,6953B,enc=,penanda_cache=0
+S4|N nginx|statis 7 KB|c=8|jalan=3|rps=80500.28|p50=96.00us|p99=2.69ms|non2xx=0|galat=0|cek=200,6953B,enc=,penanda_cache=0
+S4|J jamu|statis 7 KB, peramban|c=8|jalan=1|rps=11876.95|p50=602.00us|p99=5.34ms|non2xx=0|galat=0|cek=200,2139B,enc=zstd,penanda_cache=0
+S4|J jamu|statis 7 KB, peramban|c=8|jalan=2|rps=11907.29|p50=603.00us|p99=5.65ms|non2xx=0|galat=0|cek=200,2139B,enc=zstd,penanda_cache=0
+S4|J jamu|statis 7 KB, peramban|c=8|jalan=3|rps=12236.72|p50=591.00us|p99=5.09ms|non2xx=0|galat=0|cek=200,2139B,enc=zstd,penanda_cache=0
+S4|N nginx|statis 7 KB, peramban|c=8|jalan=1|rps=19349.74|p50=374.00us|p99=2.26ms|non2xx=0|galat=0|cek=200,2158B,enc=gzip,penanda_cache=0
+S4|N nginx|statis 7 KB, peramban|c=8|jalan=2|rps=19014.41|p50=383.00us|p99=2.96ms|non2xx=0|galat=0|cek=200,2158B,enc=gzip,penanda_cache=0
+S4|N nginx|statis 7 KB, peramban|c=8|jalan=3|rps=19306.54|p50=379.00us|p99=2.85ms|non2xx=0|galat=0|cek=200,2158B,enc=gzip,penanda_cache=0
+S4|J jamu|dinamis, SQLite|c=8|jalan=1|rps=22.40|p50=341.64ms|p99=509.11ms|non2xx=0|galat=0|cek=200,125756B,enc=,penanda_cache=0
+S4|J jamu|dinamis, SQLite|c=8|jalan=2|rps=22.21|p50=351.70ms|p99=580.85ms|non2xx=0|galat=0|cek=200,125756B,enc=,penanda_cache=0
+S4|J jamu|dinamis, SQLite|c=8|jalan=3|rps=21.89|p50=354.67ms|p99=536.02ms|non2xx=0|galat=0|cek=200,125756B,enc=,penanda_cache=0
+S4|mem|SQLite, sesudah beban dinamis|jamu: total=121MB php-fpm=87MB/5p jamu=1MB/1p caddy=32MB/1p|mariadb=125MB
+S4|J jamu|cache, disajikan PHP|c=8|jalan=1|rps=2076.65|p50=3.55ms|p99=10.49ms|non2xx=0|galat=0|cek=200,125900B,enc=,penanda_cache=1
+S4|J jamu|cache, disajikan PHP|c=8|jalan=2|rps=2179.93|p50=3.37ms|p99=10.26ms|non2xx=0|galat=0|cek=200,125900B,enc=,penanda_cache=1
+S4|J jamu|cache, disajikan PHP|c=8|jalan=3|rps=2160.24|p50=3.38ms|p99=10.27ms|non2xx=0|galat=0|cek=200,125900B,enc=,penanda_cache=1
+S4|mem|MariaDB + cache, sesudah beban cache|jamu: total=94MB php-fpm=58MB/5p jamu=1MB/1p caddy=34MB/1p|mariadb=125MB
+S4|N nginx|cache, disajikan PHP|c=8|jalan=1|rps=2963.37|p50=2.55ms|p99=5.78ms|non2xx=0|galat=0|cek=200,125900B,enc=,penanda_cache=1
+S4|N nginx|cache, disajikan PHP|c=8|jalan=2|rps=2887.18|p50=2.62ms|p99=6.28ms|non2xx=0|galat=0|cek=200,125900B,enc=,penanda_cache=1
+S4|N nginx|cache, disajikan PHP|c=8|jalan=3|rps=2994.81|p50=2.52ms|p99=6.69ms|non2xx=0|galat=0|cek=200,125900B,enc=,penanda_cache=1
+S4|C jamu+aturan|cache, disajikan Caddy|c=8|jalan=1|rps=9748.70|p50=735.00us|p99=5.43ms|non2xx=0|galat=0|cek=200,125900B,enc=,penanda_cache=1
+S4|C jamu+aturan|cache, disajikan Caddy|c=8|jalan=2|rps=9714.25|p50=733.00us|p99=5.40ms|non2xx=0|galat=0|cek=200,125900B,enc=,penanda_cache=1
+S4|C jamu+aturan|cache, disajikan Caddy|c=8|jalan=3|rps=9597.29|p50=742.00us|p99=5.03ms|non2xx=0|galat=0|cek=200,125900B,enc=,penanda_cache=1
+S4|N nginx+aturan|cache, disajikan nginx|c=8|jalan=1|rps=54007.70|p50=122.00us|p99=2.50ms|non2xx=0|galat=0|cek=200,125900B,enc=,penanda_cache=1
+S4|N nginx+aturan|cache, disajikan nginx|c=8|jalan=2|rps=51581.10|p50=128.00us|p99=2.57ms|non2xx=0|galat=0|cek=200,125900B,enc=,penanda_cache=1
+S4|N nginx+aturan|cache, disajikan nginx|c=8|jalan=3|rps=52880.50|p50=123.00us|p99=2.55ms|non2xx=0|galat=0|cek=200,125900B,enc=,penanda_cache=1
+S4|J jamu|cache, disajikan PHP, peramban|c=8|jalan=1|rps=1260.41|p50=5.99ms|p99=15.95ms|non2xx=0|galat=0|cek=200,18337B,enc=zstd,penanda_cache=1
+S4|J jamu|cache, disajikan PHP, peramban|c=8|jalan=2|rps=1276.79|p50=5.97ms|p99=14.81ms|non2xx=0|galat=0|cek=200,18337B,enc=zstd,penanda_cache=1
+S4|J jamu|cache, disajikan PHP, peramban|c=8|jalan=3|rps=1257.11|p50=6.03ms|p99=15.17ms|non2xx=0|galat=0|cek=200,18337B,enc=zstd,penanda_cache=1
+S4|C jamu+aturan|cache, disajikan Caddy, peramban|c=8|jalan=1|rps=2701.51|p50=2.85ms|p99=10.34ms|non2xx=0|galat=0|cek=200,18184B,enc=zstd,penanda_cache=1
+S4|C jamu+aturan|cache, disajikan Caddy, peramban|c=8|jalan=2|rps=2703.38|p50=2.83ms|p99=10.44ms|non2xx=0|galat=0|cek=200,18184B,enc=zstd,penanda_cache=1
+S4|C jamu+aturan|cache, disajikan Caddy, peramban|c=8|jalan=3|rps=2610.41|p50=2.95ms|p99=11.11ms|non2xx=0|galat=0|cek=200,18184B,enc=zstd,penanda_cache=1
+S4|N nginx+aturan|cache, disajikan nginx, peramban|c=8|jalan=1|rps=1455.35|p50=5.09ms|p99=12.17ms|non2xx=0|galat=0|cek=200,20884B,enc=gzip,penanda_cache=1
+S4|N nginx+aturan|cache, disajikan nginx, peramban|c=8|jalan=2|rps=1957.63|p50=4.10ms|p99=9.37ms|non2xx=0|galat=0|cek=200,20884B,enc=gzip,penanda_cache=1
+S4|N nginx+aturan|cache, disajikan nginx, peramban|c=8|jalan=3|rps=1960.37|p50=3.89ms|p99=9.13ms|non2xx=0|galat=0|cek=200,20884B,enc=gzip,penanda_cache=1
+S4|J jamu|cache, disajikan PHP|c=64|jalan=1|rps=2252.64|p50=27.83ms|p99=40.99ms|non2xx=0|galat=0|cek=200,125900B,enc=,penanda_cache=1
+S4|J jamu|cache, disajikan PHP|c=64|jalan=2|rps=2041.05|p50=30.42ms|p99=47.26ms|non2xx=0|galat=0|cek=200,125900B,enc=,penanda_cache=1
+S4|J jamu|cache, disajikan PHP|c=64|jalan=3|rps=2116.44|p50=29.47ms|p99=45.04ms|non2xx=0|galat=0|cek=200,125900B,enc=,penanda_cache=1
+S4|C jamu+aturan|cache, disajikan Caddy|c=64|jalan=1|rps=10314.24|p50=6.11ms|p99=23.20ms|non2xx=0|galat=0|cek=200,125900B,enc=,penanda_cache=1
+S4|C jamu+aturan|cache, disajikan Caddy|c=64|jalan=2|rps=10615.27|p50=5.92ms|p99=21.26ms|non2xx=0|galat=0|cek=200,125900B,enc=,penanda_cache=1
+S4|C jamu+aturan|cache, disajikan Caddy|c=64|jalan=3|rps=10168.78|p50=6.21ms|p99=23.50ms|non2xx=0|galat=0|cek=200,125900B,enc=,penanda_cache=1
+S4|J jamu|dinamis ber-cookie (cache menyala)|c=8|jalan=1|rps=25.69|p50=304.30ms|p99=465.68ms|non2xx=0|galat=0|cek=200,125756B,enc=,penanda_cache=0
+S4|J jamu|dinamis ber-cookie (cache menyala)|c=8|jalan=2|rps=26.03|p50=302.20ms|p99=355.82ms|non2xx=0|galat=0|cek=200,125756B,enc=,penanda_cache=0
+S4|J jamu|dinamis ber-cookie (cache menyala)|c=8|jalan=3|rps=25.23|p50=306.14ms|p99=464.38ms|non2xx=0|galat=0|cek=200,125756B,enc=,penanda_cache=0
+S4|J jamu|cache, disajikan PHP|c=8 saat 300 koneksi menunggu PHP|jalan=1|rps=0.53|p50=11.49s|p99=11.49s|non2xx=0|galat=0|cek=-
+S4|J jamu|cache, disajikan PHP|banjirnya sendiri (c=300, tanpa cache)|jalan=1|rps=25.41|non2xx=0|galat=0
+S4|J jamu|cache, disajikan PHP|c=8 saat 300 koneksi menunggu PHP|jalan=2|rps=0.53|p50=11.54s|p99=11.54s|non2xx=0|galat=0|cek=-
+S4|J jamu|cache, disajikan PHP|banjirnya sendiri (c=300, tanpa cache)|jalan=2|rps=25.44|non2xx=0|galat=0
+S4|J jamu|cache, disajikan PHP|c=8 saat 300 koneksi menunggu PHP|jalan=3|rps=0.53|p50=11.66s|p99=11.67s|non2xx=0|galat=0|cek=-
+S4|J jamu|cache, disajikan PHP|banjirnya sendiri (c=300, tanpa cache)|jalan=3|rps=25.06|non2xx=0|galat=0
+S4|C jamu+aturan|cache, disajikan Caddy|c=8 saat 300 koneksi menunggu PHP|jalan=1|rps=4548.65|p50=1.20ms|p99=54.36ms|non2xx=0|galat=0|cek=-
+S4|C jamu+aturan|cache, disajikan Caddy|banjirnya sendiri (c=300, tanpa cache)|jalan=1|rps=16.70|non2xx=0|galat=0
+S4|C jamu+aturan|cache, disajikan Caddy|c=8 saat 300 koneksi menunggu PHP|jalan=2|rps=4846.27|p50=1.19ms|p99=50.55ms|non2xx=0|galat=0|cek=-
+S4|C jamu+aturan|cache, disajikan Caddy|banjirnya sendiri (c=300, tanpa cache)|jalan=2|rps=15.41|non2xx=0|galat=0
+S4|C jamu+aturan|cache, disajikan Caddy|c=8 saat 300 koneksi menunggu PHP|jalan=3|rps=5129.71|p50=1.16ms|p99=17.66ms|non2xx=0|galat=0|cek=-
+S4|C jamu+aturan|cache, disajikan Caddy|banjirnya sendiri (c=300, tanpa cache)|jalan=3|rps=15.76|non2xx=0|galat=0
+S4|N nginx+aturan|cache, disajikan nginx|c=8 saat 300 koneksi menunggu PHP|jalan=1|rps=23569.99|p50=182.00us|p99=40.09ms|non2xx=0|galat=0|cek=-
+S4|N nginx+aturan|cache, disajikan nginx|banjirnya sendiri (c=300, tanpa cache)|jalan=1|rps=17.50|non2xx=0|galat=0
+S4|N nginx+aturan|cache, disajikan nginx|c=8 saat 300 koneksi menunggu PHP|jalan=2|rps=25034.69|p50=163.00us|p99=26.47ms|non2xx=0|galat=0|cek=-
+S4|N nginx+aturan|cache, disajikan nginx|banjirnya sendiri (c=300, tanpa cache)|jalan=2|rps=17.18|non2xx=0|galat=0
+S4|N nginx+aturan|cache, disajikan nginx|c=8 saat 300 koneksi menunggu PHP|jalan=3|rps=23134.48|p50=186.00us|p99=8.15ms|non2xx=0|galat=0|cek=-
+S4|N nginx+aturan|cache, disajikan nginx|banjirnya sendiri (c=300, tanpa cache)|jalan=3|rps=16.71|non2xx=0|galat=0
+S4|mem|MariaDB + cache, akhir|jamu: total=121MB php-fpm=75MB/5p jamu=1MB/1p caddy=44MB/1p|mariadb=125MB

@@ -3,7 +3,7 @@
 Paket server PHP untuk development dan production: satu perintah mengenali project,
 lalu menyalakan dan mengawasi Caddy dan php-fpm. Tanpa file konfigurasi.
 
-Status: spike S1, S2, dan S3. Kode ini sekali buang. Berjalan di Linux (php-fpm) dan
+Status: spike S1 sampai S4. Kode ini sekali buang. Berjalan di Linux (php-fpm) dan
 Windows (php-cgi dari zip resmi PHP). Rencana lengkap, hasil pengukuran, dan hasil uji ada
 di [docs/HANDOFF.md](docs/HANDOFF.md).
 
@@ -76,6 +76,13 @@ Uji asap image:
 ```bash
 tests/image.sh jamuphp:8.4
 ```
+
+## Pengukuran
+
+`docs/benchmark/s4.sh` mengukur WordPress di image ini dengan MariaDB dan WP Super Cache,
+tiap beban tiga kali jalan; lingkungannya disiapkan `docs/benchmark/s4-setup.sh`. Hasil
+mentah ada di `docs/benchmark/s4-results.txt` dan diringkas `docs/benchmark/s4-ringkas.sh`.
+Pembahasannya di bagian 19 [docs/HANDOFF.md](docs/HANDOFF.md).
 
 ## Lisensi
 
