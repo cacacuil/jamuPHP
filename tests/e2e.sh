@@ -152,6 +152,7 @@ echo 'https=', $_SERVER['HTTPS'] ?? '-', ' addr=', $_SERVER['REMOTE_ADDR'], ' pr
 EOF
   printf '%s\n' 'console.log(1);' > "$htd/a.js"
   printf '%s\n' 'export default 1;' > "$htd/a.mjs"
+  printf '%s\n' 'export default 2;' > "$htd/BESAR.MJS"
   printf '%s\n' '<svg xmlns="http://www.w3.org/2000/svg"/>' > "$htd/a.svg"
   printf '%s\n' '{"a":1}' > "$htd/a.json"
   printf '%s\n' '{"name":"uji"}' > "$htd/a.webmanifest"
@@ -216,6 +217,7 @@ EOF
   cek "jenis .css" "$(jenis "$B/gaya.css")" text/css
   cek "jenis .js" "$(jenis "$B/a.js")" text/javascript
   cek "jenis .mjs" "$(jenis "$B/a.mjs")" text/javascript
+  cek "jenis .MJS (huruf besar)" "$(jenis "$B/BESAR.MJS")" text/javascript
   cek "jenis .svg" "$(jenis "$B/a.svg")" image/svg+xml
   cek "jenis .json" "$(jenis "$B/a.json")" application/json
   cek "jenis .webmanifest" "$(jenis "$B/a.webmanifest")" application/manifest+json
