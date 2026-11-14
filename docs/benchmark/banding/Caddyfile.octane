@@ -1,0 +1,29 @@
+# Caddy di depan Laravel Octane: berkas yang ada di public dilayani Caddy, sisanya
+# diteruskan ke Octane. Pengaturan lain sama dengan yang ditulis jamu.
+{
+	admin off
+	persist_config off
+	auto_https off
+	storage file_system /tmp/caddy
+	servers {
+		protocols h1
+	}
+}
+http://:8080 {
+	log {
+		output stderr
+		format json
+	}
+	root * /app/public
+	encode zstd gzip
+	@berkas {
+		file {path}
+		not path *.php */
+	}
+	handle @berkas {
+		file_server
+	}
+	handle {
+		reverse_proxy 127.0.0.1:8000
+	}
+}

@@ -1,10 +1,11 @@
 name: banding
 # Pembanding performa terhadap FrankenPHP dan nginx + php-fpm. Lama dan tidak menguji
-# kebenaran, jadi hanya jalan bila diminta atau di branch `banding`.
+# kebenaran, jadi hanya jalan bila diminta atau di branch `banding`. Branch `banding-worker`
+# hanya mengukur Laravel pada server-server mode worker (lebih singkat).
 on:
   workflow_dispatch:
   push:
-    branches: [banding]
+    branches: [banding, banding-worker]
 
 jobs:
   banding:
@@ -15,6 +16,8 @@ jobs:
       - run: sudo apt-get update -q && sudo apt-get install -y -q wrk
       - run: docker build -t jamuphp:8.4 .
       - run: bash docs/benchmark/banding/banding.sh banding-hasil
+        env:
+          MODE: ${{ github.ref_name == 'banding-worker' && 'worker' || 'semua' }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:

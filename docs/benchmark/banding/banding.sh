@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# Membandingkan image jamuphp dengan FrankenPHP (mode klasik dan worker) dan nginx + php-fpm:
-# mesin yang sama, PHP yang sama, aplikasi yang sama, log akses menyala di semuanya.
+# Membandingkan image jamuphp dengan FrankenPHP (mode klasik dan worker), nginx + php-fpm,
+# dan Laravel Octane (RoadRunner, Swoole) di belakang Caddy: mesin yang sama, PHP yang
+# sama, aplikasi yang sama, log akses menyala di semuanya.
 # Butuh Docker, wrk, curl, unzip, dan akses internet.
 #
 #   docker build -t jamuphp:8.4 .
 #   bash docs/benchmark/banding/banding.sh [FOLDER_HASIL]
+#
+# MODE=worker hanya mengukur Laravel pada server-server mode worker dan jamu (±10 menit).
 #
 # Semua container memakai jaringan host di port 8080, satu per satu, supaya jaringan Docker
 # tidak ikut terukur.
@@ -19,6 +22,19 @@ FRANKEN=${FRANKEN_IMAGE:-dunglas/frankenphp:php8.4}
 LAMA=${LAMA:-8}     # detik per putaran wrk
 ULANG=${ULANG:-3}   # putaran per titik ukur; yang dilaporkan mediannya
 U=http://127.0.0.1:8080
+MODE=${MODE:-semua}
+APPS="halo laravel wp"
+[ "$MODE" = worker ] && APPS=laravel
+
+# Server yang diukur untuk satu aplikasi. Mode worker hanya ada untuk Laravel.
+server_untuk() { # APP
+  local worker="franken-worker octane-roadrunner octane-swoole"
+  if [ "$MODE" = worker ]; then echo "jamu $worker"; return; fi
+  case $1 in
+    laravel) echo "jamu franken nginx $worker" ;;
+    *) echo "jamu franken nginx" ;;
+  esac
+}
 
 ms() { date +%s%3N; }
 kode() { curl -s -o /dev/null --noproxy '*' -m 3 -w '%{http_code}' "$1" || true; }
@@ -60,7 +76,11 @@ PHP
   { echo '<!doctype html><title>statis</title>'; head -c 6960 /dev/zero | tr '\0' 'x'; } > "$apps/halo/statis.html"
 
   di_image . composer create-project laravel/laravel laravel --no-interaction --prefer-dist --no-progress
-  di_image laravel composer require laravel/octane --no-interaction --no-progress
+  di_image laravel composer require laravel/octane spiral/roadrunner-http spiral/roadrunner-cli --no-interaction --no-progress
+  # Meniru extension yang crash di dalam aplikasi: proses PHP yang melayani permintaan ini mati.
+  cat >> "$apps/laravel/routes/web.php" <<'PHP'
+Route::get('/mati', function () { posix_kill(posix_getpid(), 11); return 'masih hidup'; });
+PHP
   # Production, dan sesi di cookie: tanpa itu yang terukur adalah kunci SQLite milik
   # aplikasi, bukan servernya.
   sed -i -e 's/^APP_ENV=.*/APP_ENV=production/' -e 's/^APP_DEBUG=.*/APP_DEBUG=false/' \
@@ -68,6 +88,7 @@ PHP
     -e 's/^LOG_CHANNEL=.*/LOG_CHANNEL=stderr/' "$apps/laravel/.env"
   echo "aplikasi: $(di_image laravel php artisan --version)" | tee -a "$W/info.txt"
 
+  [ "$MODE" = worker ] && return
   curl -fsSL -o "$W/wp.zip" https://wordpress.org/latest.zip
   unzip -q "$W/wp.zip" -d "$apps"
   mv "$apps/wordpress" "$apps/wp"
@@ -97,10 +118,10 @@ PHP
 }
 
 rakit() {
-  local app siap
+  local app siap mesin
   docker build -q -t b-franken --build-arg DASAR="$FRANKEN" -f "$B/Dockerfile.franken" "$B"
   docker build -q -t b-nginx --build-arg DASAR="$JAMU" -f "$B/Dockerfile.nginx" "$B"
-  for app in halo laravel wp; do
+  for app in $APPS; do
     siap=true
     # Cache konfigurasi, rute, dan view seperti deploy production; berkas worker Octane
     # disalin dari paketnya (yang dikerjakan `artisan octane:install`).
@@ -109,13 +130,19 @@ rakit() {
     docker build -q -t "b-nginx-$app" --build-arg DASAR=b-nginx --build-arg SIAPKAN="$siap" -f "$B/Dockerfile.app" "$W/apps/$app"
     docker build -q -t "b-franken-$app" --build-arg DASAR=b-franken --build-arg PEMILIK=root --build-arg SIAPKAN="$siap" -f "$B/Dockerfile.app" "$W/apps/$app"
   done
+  for mesin in roadrunner swoole; do
+    docker build -q -t "b-octane-$mesin-laravel" --build-arg DASAR=b-jamu-laravel --build-arg MESIN="$mesin" -f "$B/Dockerfile.octane" "$B"
+  done
   {
     echo "server: jamu = $(docker run --rm --entrypoint caddy "$JAMU" version | cut -d' ' -f1) (Caddy) + php-fpm ondemand"
     echo "server: franken = $(docker run --rm b-franken frankenphp version | head -1)"
     echo "server: nginx = $(docker run --rm --entrypoint nginx b-nginx -v 2>&1) + php-fpm static"
-    for app in halo laravel wp; do
+    echo "server: octane-roadrunner = $(docker run --rm --entrypoint rr b-octane-roadrunner-laravel --version) di belakang Caddy"
+    echo "server: octane-swoole = Swoole $(docker run --rm --entrypoint php b-octane-swoole-laravel -r 'echo phpversion("swoole");') di belakang Caddy"
+    for app in $APPS; do
       echo "image: $app jamu=$(ukuran "b-jamu-$app") franken=$(ukuran "b-franken-$app") nginx=$(ukuran "b-nginx-$app") MB"
     done
+    echo "image: laravel octane-roadrunner=$(ukuran b-octane-roadrunner-laravel) octane-swoole=$(ukuran b-octane-swoole-laravel) MB"
   } | tee -a "$W/info.txt"
 }
 ukuran() { docker image inspect -f '{{.Size}}' "$1" | awk '{ printf "%.0f", $1 / 1048576 }'; }
@@ -138,6 +165,8 @@ mulai() { # SERVER APP [opsi docker run...]
         "b-franken-$app" frankenphp run --adapter caddyfile --config "/banding/Caddyfile.$server" ;;
     nginx)
       docker run -d --name b-uji --network host -e ROOT="$root" -v "$B:/banding:ro" "$@" "b-nginx-$app" ;;
+    octane-*)
+      docker run -d --name b-uji --network host -v "$B:/banding:ro" "$@" "b-$server-$app" ;;
   esac > /dev/null
   for _ in $(seq 600); do
     if [ "$(kode "$U$path")" = 200 ]; then echo $(($(ms) - t0)); return; fi
@@ -222,25 +251,25 @@ ukur() { # SERVER APP
 
 # Satu permintaan mematikan proses PHP yang melayaninya, selagi situs dibebani 16 koneksi.
 # Container dijalankan dengan --restart always, seperti di production.
-jatuh() { # SERVER
-  local server=$1 akhir t k wrk putus
-  mulai "$server" halo --restart always > /dev/null
+jatuh() { # SERVER [APP PATH PATH_MATI]
+  local server=$1 app=${2:-halo} path=${3:-/index.php} mati=${4:-/mati.php} akhir t k wrk putus
+  mulai "$server" "$app" --restart always > /dev/null
   akhir=$(($(ms) + 13000))
   (while t=$(ms) && [ "$t" -lt "$akhir" ]; do
-    echo "$t $(kode "$U/index.php")"
+    echo "$t $(kode "$U$path")"
     sleep 0.05
-  done) > "$W/denyut-$server.txt" &
-  wrk_sekali 16 "$U/index.php" 12 > "$W/jatuh-wrk.txt" &
+  done) > "$W/denyut-$server-$app.txt" &
+  wrk_sekali 16 "$U$path" 12 > "$W/jatuh-wrk.txt" &
   sleep 4
-  k=$(kode "$U/mati.php")
+  k=$(kode "$U$mati")
   wait
   wrk=$(cat "$W/jatuh-wrk.txt")
   # Lama putus: dari denyut gagal pertama sampai denyut berhasil berikutnya.
   putus=$(awk '
     $2 != 200 { n++; if (!a) a = $1 }
     $2 == 200 && a && !b { b = $1 }
-    END { print (a ? (b ? b - a : "tidak-pulih") : 0), n + 0 }' "$W/denyut-$server.txt")
-  echo "$server $k $wrk $putus $(docker inspect -f '{{.RestartCount}}' b-uji)" | tee -a "$W/jatuh.txt"
+    END { print (a ? (b ? b - a : "tidak-pulih") : 0), n + 0 }' "$W/denyut-$server-$app.txt")
+  echo "$server/$app $k $wrk $putus $(docker inspect -f '{{.RestartCount}}' b-uji)" | tee -a "$W/jatuh.txt"
   berhenti
 }
 
@@ -281,21 +310,23 @@ utama() {
   rakit
   # Semua pasangan dicoba dulu sebentar: salah konfigurasi ketahuan sebelum pengukuran
   # yang lama dimulai.
-  for app in halo laravel wp; do
-    for server in jamu franken nginx; do
+  for app in $APPS; do
+    for server in $(server_untuk "$app"); do
       mulai "$server" "$app" > /dev/null
       periksa "$server" "$app"
     done
   done
-  mulai franken-worker laravel > /dev/null
-  periksa franken-worker laravel
   # Server yang dibandingkan pada beban yang sama diukur berurutan, supaya naik-turunnya
   # mesin CI tidak memihak salah satu.
-  for app in halo laravel wp; do
-    for server in jamu franken nginx; do ukur "$server" "$app"; done
-    if [ "$app" = laravel ]; then ukur franken-worker laravel; fi
+  for app in $APPS; do
+    for server in $(server_untuk "$app"); do ukur "$server" "$app"; done
   done
-  for server in jamu franken nginx; do jatuh "$server"; done
+  if [ "$MODE" != worker ]; then
+    for server in jamu franken nginx; do jatuh "$server"; done
+  fi
+  # Crash di dalam aplikasi Laravel: yang dibandingkan adalah mode worker dengan pekerja
+  # berupa thread (FrankenPHP) dan berupa proses (Octane), dan php-fpm sebagai patokan.
+  for server in jamu franken-worker octane-roadrunner octane-swoole; do jatuh "$server" laravel /up /mati; done
   ringkas
 }
 

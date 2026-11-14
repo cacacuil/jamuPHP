@@ -1,0 +1,14 @@
+# Laravel Octane di belakang Caddy: aplikasi dimuat sekali, dan tiap pekerja PHP adalah
+# proses sendiri. Dasarnya image aplikasi di atas jamuphp, jadi PHP dan Caddy-nya sama.
+ARG DASAR
+FROM ghcr.io/roadrunner-server/roadrunner:2025.1 AS rr
+FROM ${DASAR}
+ARG MESIN
+USER root
+COPY --from=rr /usr/bin/rr /usr/local/bin/rr
+RUN if [ "$MESIN" = swoole ]; then install-php-extensions swoole; fi
+USER www-data
+ENV MESIN=${MESIN}
+HEALTHCHECK NONE
+ENTRYPOINT ["/bin/sh", "/banding/mulai-octane.sh"]
+CMD []
