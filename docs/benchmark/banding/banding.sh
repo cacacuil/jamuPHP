@@ -127,6 +127,7 @@ PHP
 
 rakit() {
   local app siap mesin
+  local info_cli='$oc = opcache_get_status(false); echo "PHP ", PHP_VERSION, " ", PHP_SAPI, " opcache=", $oc && $oc["opcache_enabled"] ? "on" : "off";'
   docker build -q -t b-franken --build-arg DASAR="$FRANKEN" -f "$B/Dockerfile.franken" "$B"
   docker build -q -t b-nginx --build-arg DASAR="$JAMU" -f "$B/Dockerfile.nginx" "$B"
   for app in $APPS; do
@@ -140,6 +141,8 @@ rakit() {
   done
   for mesin in roadrunner swoole; do
     docker build -q -t "b-octane-$mesin-laravel" --build-arg DASAR=b-jamu-laravel --build-arg MESIN="$mesin" -f "$B/Dockerfile.octane" "$B"
+    echo "php: octane-$mesin = $(docker run --rm --entrypoint php "b-octane-$mesin-laravel" -r "$info_cli")" | tee -a "$W/info.txt"
+    tail -n 1 "$W/info.txt" | grep -q 'opcache=on' || gagal "opcache tidak aktif di octane-$mesin"
   done
   {
     echo "server: jamu = $(docker run --rm --entrypoint caddy "$JAMU" version | cut -d' ' -f1) (Caddy) + php-fpm ondemand"

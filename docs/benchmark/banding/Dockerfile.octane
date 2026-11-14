@@ -9,6 +9,8 @@ COPY --from=rr /usr/bin/rr /usr/local/bin/rr
 # Octane sendiri butuh pcntl (sinyal). Swoole adalah extension PHP; RoadRunner adalah program
 # terpisah yang butuh extension sockets.
 RUN if [ "$MESIN" = swoole ]; then install-php-extensions pcntl swoole; else install-php-extensions pcntl sockets; fi
+# Octane berjalan di PHP baris perintah, yang bawaannya tanpa opcache.
+RUN echo 'opcache.enable_cli=1' > "$PHP_INI_DIR/conf.d/zz-octane.ini"
 USER www-data
 ENV MESIN=${MESIN}
 HEALTHCHECK NONE
