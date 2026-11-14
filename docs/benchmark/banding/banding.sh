@@ -91,7 +91,8 @@ PHP
     || gagal "WordPress tidak bisa dipasang"
   [[ $(curl -s --noproxy '*' -m 30 "$U/") == *"Situs Banding"* ]] || gagal "WordPress belum terpasang"
   echo "aplikasi: WordPress $(sed -n "s/^\$wp_version = '\(.*\)';/\1/p" "$apps/wp/wp-includes/version.php") (SQLite)" | tee -a "$W/info.txt"
-  docker exec b-uji chmod -R a+rX /app/wp-content
+  # Berkas yang ditulis WordPress (basis data) milik www-data; host harus bisa menyalinnya.
+  docker exec -u 0 b-uji chmod -R a+rX /app/wp-content
   berhenti
 }
 
