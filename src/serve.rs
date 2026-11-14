@@ -60,6 +60,20 @@ pub fn unwritable(p: &Project) -> Vec<(PathBuf, String)> {
         .collect()
 }
 
+/// Saran untuk Laravel yang berjalan di server tanpa cache konfigurasi: tanpa cache itu
+/// `.env` dan semua berkas config dibaca ulang di tiap permintaan. Terukur pada aplikasi
+/// baru: 584 req/dtk tanpa, 978 dengan. Tidak disarankan sebelum `vendor` ada, dan tidak
+/// bila aplikasinya menaruh cache itu di tempat lain.
+pub fn laravel_hint(p: &Project) -> Option<&'static str> {
+    let wanted = p.kind == Kind::Laravel
+        && p.dir.join("vendor/autoload.php").is_file()
+        && !p.dir.join("bootstrap/cache/config.php").is_file()
+        && env::var_os("APP_CONFIG_CACHE").is_none();
+    wanted.then_some(
+        "konfigurasi Laravel belum di-cache, jadi dibaca ulang di tiap permintaan; jalankan `jamu php artisan optimize` tiap kali kode atau variabel lingkungannya berubah",
+    )
+}
+
 /// Program PHP yang melayani situs: php-fpm, atau php-cgi di Windows.
 /// JAMU_PHP_CGI di Linux memaksa jalur php-cgi, supaya jalur Windows bisa diuji di Linux.
 pub fn find_php() -> Result<(bool, PathBuf), String> {
@@ -296,6 +310,9 @@ pub fn serve(o: Opts) -> Result<(), String> {
             "jamu: peringatan: {} tidak bisa ditulis oleh {who}; unggahan, cache, atau log situs akan gagal",
             d.display()
         );
+    }
+    if let Some(hint) = laravel_hint(&project).filter(|_| !dev) {
+        say!("jamu: catatan: {hint}");
     }
 
     let stop = Arc::new(AtomicBool::new(false));

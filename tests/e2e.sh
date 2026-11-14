@@ -725,10 +725,27 @@ grup_check() {
   printf '%s\n' 'APP_KEY=base64:abc' 'APP_DEBUG=true' > "$d/laravel/.env"
   JAMU_COMPOSER="$d/tidak-ada.phar" periksa "$d/laravel"
   cek "laravel dev dengan APP_DEBUG: bukan masalah" "$(has "$keluaran" APP_DEBUG)" no "$keluaran"
+  cek "laravel dev: cache konfigurasi tidak disinggung" "$(has "$keluaran" 'belum di-cache')" no "$keluaran"
   JAMU_COMPOSER="$d/tidak-ada.phar" periksa "$d/laravel" --behind-proxy
   cek "laravel di server dengan APP_DEBUG: masalah" "$(has "$keluaran" 'MASALAH  APP_DEBUG')" yes "$keluaran"
+  cek "laravel di server tanpa cache konfigurasi: catatan" "$(has "$keluaran" 'catatan  konfigurasi Laravel belum di-cache')" yes "$keluaran"
   APP_DEBUG=false JAMU_COMPOSER="$d/tidak-ada.phar" periksa "$d/laravel" --behind-proxy
   cek "variabel lingkungan menang atas .env" "$(has "$keluaran" 'MASALAH  APP_DEBUG')" no "$keluaran"
+  # Cache konfigurasi adalah tuas terbesar untuk Laravel, jadi `serve` ikut menyebutnya di
+  # server; di dev tidak, karena di sana cache itu justru mengganggu.
+  local catatan='jamu: catatan: konfigurasi Laravel belum di-cache'
+  start_jamu "$d/laravel" 8108 "$log" --behind-proxy || cek "start laravel di server" gagal ok
+  cek "serve di server tanpa cache konfigurasi: catatan" "$(has "$(cat "$log")" "$catatan")" yes "$(cat "$log")"
+  stop_jamu
+  start_jamu "$d/laravel" 8108 "$log" || cek "start laravel dev" gagal ok
+  cek "serve dev: cache konfigurasi tidak disinggung" "$(has "$(cat "$log")" 'belum di-cache')" no "$(cat "$log")"
+  stop_jamu
+  mkdir -p "$d/laravel/bootstrap/cache"; printf '%s\n' '<?php return [];' > "$d/laravel/bootstrap/cache/config.php"
+  APP_DEBUG=false JAMU_COMPOSER="$d/tidak-ada.phar" periksa "$d/laravel" --behind-proxy
+  cek "laravel dengan cache konfigurasi: tidak disinggung" "$(has "$keluaran" 'belum di-cache')" no "$keluaran"
+  start_jamu "$d/laravel" 8108 "$log" --behind-proxy || cek "start laravel ber-cache" gagal ok
+  cek "serve dengan cache konfigurasi: tidak disinggung" "$(has "$(cat "$log")" 'belum di-cache')" no "$(cat "$log")"
+  stop_jamu
 
   # Mode domain: nama yang belum ada di DNS adalah masalah; nama yang aneh ditolak sebelum
   # sempat ditulis ke konfigurasi.

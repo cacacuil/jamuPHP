@@ -14,7 +14,7 @@ use crate::config::{Limits, Php, body_limit, caddyfile};
 use crate::detect::{Kind, kind_name};
 use crate::mail;
 use crate::paths::{find_bin, find_file, open_state};
-use crate::serve::{find_php, unwritable, write, write_php};
+use crate::serve::{find_php, laravel_hint, unwritable, write, write_php};
 use crate::{Opts, settings};
 
 #[derive(Default)]
@@ -302,6 +302,9 @@ pub fn check(o: Opts) -> Result<(), String> {
                 r.problem(
                     "APP_DEBUG menyala: di server, halaman galat memperlihatkan isi konfigurasi ke pengunjung",
                 );
+            }
+            if let Some(hint) = laravel_hint(&project).filter(|_| !dev) {
+                r.note(hint);
             }
         }
         Kind::WordPress => {
