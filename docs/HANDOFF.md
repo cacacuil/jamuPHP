@@ -1,6 +1,6 @@
 # JamuPHP: handoff v2
 
-Tanggal: 14 November 2026, revisi 13. Menggantikan handoff v1 ("XAMPP berbasis Rust").
+Tanggal: 14 November 2026, revisi 14. Menggantikan handoff v1 ("XAMPP berbasis Rust").
 Nama produk: JamuPHP. Perintahnya `jamu`, file config-nya `jamu.toml`. Repositori:
 https://github.com/cacacuil/jamuphp (lisensi AGPL-3.0).
 
@@ -41,6 +41,9 @@ Perubahan di revisi 13: owner menetapkan sasaran berikutnya adalah performa dan 
 pengerasan keamanan ditunda. Dikerjakan di branch `stabil-performa` (bagian 22): batas waktu
 permintaan, jumlah pekerja mengikuti memori container, batas unggahan satu sumber, dan
 kabar php-fpm yang terbaca. Penyetelan opcache dan JIT diukur dan ditolak.
+Perubahan di revisi 14: image jamuphp dibandingkan dengan FrankenPHP (mode klasik dan
+worker) dan nginx + php-fpm di CI (bagian 23). Dua pemborosan milik jamu sendiri ketemu
+dan diperbaiki: aturan jenis berkas dan penguraian log akses.
 
 ## 1. Inti dalam satu menit
 
@@ -1765,6 +1768,130 @@ jumlah pekerja mengikuti `--memory`.
   terlihat dalam jam atau hari.
 - **Tag image yang tetap per rilis.** Sekarang hanya `:8.4` yang terus ditimpa, jadi tidak
   ada versi untuk kembali bila rilis baru bermasalah.
+
+## 23. Pembanding: FrankenPHP dan nginx + php-fpm (belum di `main`)
+
+Permintaan owner: uji dan bandingkan dengan yang lain, misalnya FrankenPHP. Skripnya
+`docs/benchmark/banding/banding.sh`, dijalankan workflow `banding` (hanya bila diminta
+atau di branch `banding`). Tabel lengkap: `docs/benchmark/banding/hasil-2026-11-14.md`.
+
+### Cara mengukur
+
+- Satu mesin CI (4 core, 15 GB), satu run, semua server bergantian di port yang sama
+  dengan jaringan host. `wrk` 4 thread, 8 detik, tiga putaran, yang dicatat mediannya.
+  `wrk` berjalan di mesin yang sama.
+- PHP 8.4.27 di semuanya, opcache aktif (diperiksa skrip), JIT mati, `php.ini-production`,
+  log akses menyala. Jumlah pekerja sama: 8 proses php-fpm, 8 thread FrankenPHP.
+- **jamu**: image `jamuphp:8.4` apa adanya (Caddy 2.11.9 + php-fpm ondemand).
+- **FrankenPHP klasik**: image resmi `dunglas/frankenphp:php8.4` (v1.13.5, Caddy 2.11.9)
+  dengan opcache dipasang seperti anjuran dokumentasinya.
+- **FrankenPHP worker**: image yang sama, Laravel lewat berkas worker milik Octane.
+- **nginx + php-fpm**: nginx 1.26.3 ditambahkan ke image jamuphp, jadi PHP dan
+  extension-nya persis sama; `pm = static`, pengaturan tercepat untuk php-fpm.
+- Aplikasi: halaman PHP satu baris, berkas statis 7 KB, Laravel 13.42 (production,
+  `artisan optimize`, sesi di cookie), WordPress 7.1.4 dengan SQLite dan tema bawaan.
+
+### Hasil (req/dtk, 64 koneksi)
+
+| Beban | jamu | FrankenPHP klasik | nginx + php-fpm | FrankenPHP worker |
+|---|---|---|---|---|
+| Halaman PHP satu baris | 10.360 | 19.661 | 27.517 | - |
+| Berkas statis 7 KB | 23.577 | 26.274 | 99.821 | - |
+| Laravel `/up` | 1.423 | 1.480 | 1.613 | 3.856 |
+| Laravel `/` (halaman sambutan) | 1.103 | 1.135 | 1.232 | 2.263 |
+| WordPress halaman depan | 63,5 | 66,6 | 66,5 | - |
+
+Tidak ada satu pun permintaan gagal di seluruh tabel.
+
+| Hal lain | jamu | FrankenPHP klasik | nginx + php-fpm | FrankenPHP worker |
+|---|---|---|---|---|
+| p99 Laravel `/up` | 54 ms | 53 ms | 47 ms | 29 ms |
+| p99 WordPress | 1.690 ms | 1.020 ms | 1.590 ms | - |
+| Memori Laravel di bawah beban | 72-76 MB | 62-64 MB | 56-60 MB | 74-75 MB |
+| Memori Laravel saat diam | 45 MB | 43 MB | 51 MB | 91 MB |
+| Memori WordPress di bawah beban | 148 MB | 133 MB | 129 MB | - |
+| Siap melayani (Laravel) | 273 ms | 292 ms | 280 ms | 356 ms |
+| Ukuran image dengan Laravel | 753 MB | 622 MB | 762 MB | 622 MB |
+
+Image jamuphp lebih besar karena berisi 11 extension tambahan, Composer, dan msmtp;
+image FrankenPHP di sini hanya ditambah opcache.
+
+**Satu proses PHP crash selagi situs dibebani 16 koneksi** (`posix_kill` SIGSEGV ke
+dirinya sendiri, meniru extension yang crash; container `--restart always`):
+
+| | jamu | FrankenPHP klasik | nginx + php-fpm |
+|---|---|---|---|
+| Permintaan yang crash | 502 | koneksi putus | 502 |
+| Permintaan lain yang gagal | 0 dari 109.709 | semua yang sedang berjalan | 0 dari 313.399 |
+| Situs tidak menjawab | 0 ms | sekitar 300 ms | 0 ms |
+| Container diulang Docker | tidak | ya, satu kali | tidak |
+
+Jumlah galat FrankenPHP yang dicetak `wrk` (75.664) tidak dipakai: selama server mati
+`wrk` mencoba menyambung berulang-ulang dan setiap percobaan dihitung.
+
+### Yang terbaca dari angka itu
+
+1. **Di aplikasi nyata jamu setara FrankenPHP klasik**: 3-4% di belakang pada Laravel,
+   sama pada WordPress. Terhadap nginx + php-fpm jamu tertinggal 10-12% pada Laravel dan
+   sama pada WordPress. Pada WordPress waktu habis di PHP, bukan di server.
+2. **Di halaman yang hampir kosong jamu paling lambat**: separuh FrankenPHP, sepertiga
+   nginx. Sebabnya jalur FastCGI di Caddy, bukan jamu: di sandbox, Caddy dengan Caddyfile
+   lima baris ke php-fpm yang sama mencapai 7.900 req/dtk, nginx 20.600. Selisih itu
+   sekitar 0,25 ms CPU per permintaan, dan itulah yang terlihat sebagai 10% di Laravel.
+3. **Berkas statis: nginx empat kali Caddy.** jamu dan FrankenPHP sama-sama Caddy dan
+   kini berselisih 10%.
+4. **Worker mode adalah satu-satunya loncatan besar**: Laravel 2 sampai 2,7 kali lebih
+   cepat dan p99 separuhnya, dengan memori diam dua kali lipat. Ini benchmark aplikasi
+   nyata yang disyaratkan baris "Worker mode" di bagian 5.
+5. **Kestabilan: php-fpm mengurung crash di satu proses.** Di FrankenPHP satu crash PHP
+   menjatuhkan seluruh server; situs pulih setelah Docker menyalakannya ulang.
+6. Waktu siap dan memori diam praktis sama di ketiganya.
+
+### Yang diperbaiki di jamu karena pengukuran ini
+
+Di run pertama berkas statis jamu 19% di bawah FrankenPHP walau keduanya Caddy 2.11.9.
+Sebabnya dicari di sandbox dengan Caddy yang sama:
+
+| Berkas statis 7 KB, sandbox | req/dtk |
+|---|---|
+| jamu sebelum perbaikan | 12.700-14.300 |
+| Caddy saja, Caddyfile buatan jamu | 14.300-15.900 |
+| Caddy saja, tanpa aturan jenis berkas | 17.800-20.200 |
+| jamu sesudah dua perbaikan | 16.000-16.600 |
+
+1. **Jenis berkas dicari sekali per permintaan.** 31 pasang matcher dan `header` diganti
+   satu `map` dengan kunci regex yang tidak peka huruf besar. Uji e2e baru: akhiran
+   huruf besar (`BESAR.MJS`).
+2. **Log akses: hanya lima bagian yang dipakai yang diuraikan.** Sebelumnya seluruh JSON
+   baris itu, termasuk semua header, dibangun menjadi pohon; di 15.000 req/dtk itu 7%
+   CPU mesin.
+
+Di CI, jamu terhadap FrankenPHP pada berkas statis naik dari 81% ke 90%, pada halaman
+PHP satu baris dari 49% ke 53%. Pada Laravel tidak ada perubahan yang berarti (95% ke
+96-97%, di dalam derau).
+
+### Yang diukur dan ditolak
+
+- **Melonggarkan pengumpul sampah Caddy (`GOGC=400`).** Halaman satu baris +15%, berkas
+  statis +24%, Laravel tidak berubah (535-575 req/dtk dengan, 534-540 tanpa), dan memori
+  Caddy naik dari 60 ke 87 MB. Tidak ada untungnya di aplikasi nyata.
+
+### Batas pengukuran ini
+
+- Satu run di mesin CI bersama; selisih di bawah 5% jangan dibaca sebagai selisih.
+  Antara run pertama dan terakhir angka mutlak berbeda sampai 10%.
+- WordPress memakai SQLite, bukan MySQL. Basis datanya sama di ketiga server, tetapi
+  angka mutlaknya bukan angka production.
+- Putaran 8 detik: tidak ada yang bisa dikatakan tentang kebocoran atau jam-jam panjang.
+- Belum diukur: HTTPS, HTTP/2, unggahan, banyak situs dalam satu node, container dengan
+  batas memori kecil, dan WordPress dengan cache halaman.
+- nginx di image Debian meneruskan `Host` tanpa port ke PHP; di konfigurasi pembanding
+  itu dibetulkan supaya WordPress tidak mengalihkan setiap permintaan.
+
+### Hasil uji
+
+`tests/e2e.sh`: 279 pemeriksaan di jalur php-fpm dan 276 di jalur `php-cgi`, semuanya
+lulus di sandbox. 39 tes unit.
 
 ## Sumber
 
