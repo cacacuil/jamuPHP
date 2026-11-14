@@ -75,9 +75,6 @@ PHP
   unzip -q "$W/sqlite.zip" -d "$apps/wp/wp-content/plugins"
   cp "$apps/wp/wp-content/plugins/sqlite-database-integration/db.copy" "$apps/wp/wp-content/db.php"
   cp "$B/wp-config.php" "$apps/wp/wp-config.php"
-  # Diagnosis: /?lihat-server mencetak variabel server yang dilihat WordPress.
-  cp "$B/lihat-server.php" "$apps/wp/lihat-server.php"
-  sed -i '1s|^<?php|<?php if ( isset( $_GET["lihat-server"] ) ) { require __DIR__ . "/lihat-server.php"; exit; }|' "$apps/wp/index.php"
   # WordPress dipasang sekali lewat jamu; basis data SQLite-nya lalu ikut ke semua image.
   # Alamatnya harus sama dengan alamat saat diukur, kalau tidak WordPress mengalihkan.
   chmod -R a+rwX "$apps/wp"
@@ -147,7 +144,6 @@ mulai() { # SERVER APP [opsi docker run...]
     sleep 0.05
   done
   curl -s --noproxy '*' -m 10 -o /dev/null -D - "$U$path" | head -15 >&2 || true
-  curl -s --noproxy '*' -m 10 "$U/?lihat-server" | head -20 >&2 || true
   gagal "$server/$app tidak pernah menjawab 200 di $path"
 }
 
