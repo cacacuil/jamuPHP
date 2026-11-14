@@ -23,7 +23,7 @@ U=http://127.0.0.1:8080
 ms() { date +%s%3N; }
 kode() { curl -s -o /dev/null --noproxy '*' -m 3 -w '%{http_code}' "$1" || true; }
 berhenti() { docker rm -f b-uji >/dev/null 2>&1 || true; }
-gagal() { echo "GAGAL: $*" >&2; docker logs b-uji 2>&1 | tail -30 >&2 || true; exit 1; }
+gagal() { echo "GAGAL: $*" >&2; docker logs b-uji 2>&1 | tail -15 >&2 || true; exit 1; }
 
 # Halaman yang diukur per aplikasi, dengan teks yang harus ada di jawabannya.
 halaman() {
@@ -143,6 +143,7 @@ mulai() { # SERVER APP [opsi docker run...]
     if [ "$(kode "$U$path")" = 200 ]; then echo $(($(ms) - t0)); return; fi
     sleep 0.05
   done
+  curl -s --noproxy '*' -m 10 -o /dev/null -D - "$U$path" | head -15 >&2 || true
   gagal "$server/$app tidak pernah menjawab 200 di $path"
 }
 
@@ -272,6 +273,16 @@ utama() {
   : > "$W/info.txt"
   siapkan
   rakit
+  # Semua pasangan dicoba dulu sebentar: salah konfigurasi ketahuan sebelum pengukuran
+  # yang lama dimulai.
+  for app in halo laravel wp; do
+    for server in jamu franken nginx; do
+      mulai "$server" "$app" > /dev/null
+      periksa "$server" "$app"
+    done
+  done
+  mulai franken-worker laravel > /dev/null
+  periksa franken-worker laravel
   # Server yang dibandingkan pada beban yang sama diukur berurutan, supaya naik-turunnya
   # mesin CI tidak memihak salah satu.
   for app in halo laravel wp; do
