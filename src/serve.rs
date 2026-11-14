@@ -4,61 +4,20 @@
 use std::io::Read;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
-use crate::config::{PING_PATH, Php, Plan, caddyfile, cgi_ini, cgi_workers, fpm_conf, workers};
-use crate::detect::{Kind, Project, detect, kind_name};
-use crate::supervise::supervise;
+use crate::cli::{check_version, php_cli, php_version};
+use crate::config::{
+    PING_PATH, Php, Plan, Task, caddyfile, cgi_ini, cgi_workers, fpm_conf, workers,
+};
+use crate::detect::{Kind, Project, kind_name};
+use crate::paths::{find_bin, fnv1a, open_state};
+use crate::settings;
+use crate::supervise::{plain_log, supervise};
 use crate::{Opts, USAGE, os};
-
-fn find_bin(env_name: &str, names: &[&str]) -> Result<PathBuf, String> {
-    if let Some(p) = env::var_os(env_name).filter(|p| !p.is_empty()) {
-        return Ok(PathBuf::from(p));
-    }
-    // Yang dibawa bersama jamu (di folder yang sama, atau subfolder `php`) menang atas PATH.
-    let beside = env::current_exe()
-        .ok()
-        .and_then(|e| e.parent().map(Path::to_path_buf));
-    let bundled = beside.iter().flat_map(|d| [d.clone(), d.join("php")]);
-    let path = env::var_os("PATH").unwrap_or_default();
-    for dir in bundled
-        .chain(env::split_paths(&path))
-        .chain(os::BIN_DIRS.iter().map(PathBuf::from))
-    {
-        for name in names {
-            let p = dir.join(format!("{name}{}", env::consts::EXE_SUFFIX));
-            if p.is_file() {
-                return Ok(p);
-            }
-        }
-    }
-    Err(format!(
-        "{} tidak ditemukan. Pasang, atau tunjuk lewat variabel {env_name}.",
-        names[0]
-    ))
-}
-
-fn fnv1a(bytes: &[u8]) -> u32 {
-    bytes.iter().fold(0x811c9dc5u32, |h, b| {
-        (h ^ *b as u32).wrapping_mul(0x01000193)
-    })
-}
-
-fn state_dir(base: &Path, project: &Path) -> PathBuf {
-    let name: String = project
-        .file_name()
-        .map(|n| n.to_string_lossy().to_lowercase())
-        .unwrap_or_default()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let hash = fnv1a(project.as_os_str().as_encoded_bytes());
-    base.join(format!("{name}-{hash:08x}"))
-}
 
 /// Port dianggap bebas bila tidak ada yang menjawab di loopback dan kita bisa mengikatnya.
 /// Mode dev hanya menguji loopback: mengikat 0.0.0.0 di Windows memunculkan dialog firewall.
@@ -104,7 +63,7 @@ fn warn_unwritable(p: &Project) {
 
 pub fn serve(o: Opts) -> Result<(), String> {
     os::init();
-    let project = detect(&o.dir);
+    let (project, settings) = settings::load(&o.dir)?;
     let dev = o.domain.is_none() && !o.behind_proxy;
     let caddy = find_bin("JAMU_CADDY", &["caddy"])?;
     // JAMU_PHP_CGI di Linux memaksa jalur php-cgi, supaya jalur Windows bisa diuji di Linux.
@@ -169,27 +128,13 @@ pub fn serve(o: Opts) -> Result<(), String> {
         }
     };
 
-    let mut state = state_dir(&os::state_base(), &project.dir);
-    if let Err(first) = fs::create_dir_all(state.join("caddy")) {
-        let wanted = state.clone();
-        let fallback = os::fallback_state_base().map(|base| state_dir(&base, &project.dir));
-        match fallback.filter(|s| fs::create_dir_all(s.join("caddy")).is_ok()) {
-            Some(s) => state = s,
-            None => {
-                return Err(format!(
-                    "Tidak ada folder yang bisa ditulis untuk konfigurasi: {} ({first}), dan folder sementara juga tidak bisa. \
-                     Tunjuk folder yang bisa ditulis lewat variabel XDG_STATE_HOME, atau pasang tmpfs di sana.",
-                    wanted.display()
-                ));
-            }
-        }
-    }
+    let state = open_state(&project.dir)?;
     let write = |p: &Path, text: String| {
         fs::write(p, text).map_err(|e| format!("tidak bisa menulis {}: {e}", p.display()))
     };
     let php = if cgi {
         let ini = state.join("php.ini");
-        write(&ini, cgi_ini(&php_bin, dev))?;
+        write(&ini, cgi_ini(&php_bin, dev, &settings.ini()))?;
         Php::Cgi {
             bin: php_bin,
             ini,
@@ -206,41 +151,70 @@ pub fn serve(o: Opts) -> Result<(), String> {
         }
         let _ = fs::remove_file(&sock);
         let conf = state.join("php-fpm.conf");
-        write(&conf, fpm_conf(&sock, dev))?;
+        write(&conf, fpm_conf(&sock, dev, &settings.ini()))?;
         Php::Fpm {
             bin: php_bin,
             conf,
             sock,
         }
     };
-    let plan = Plan {
-        caddy,
-        caddyfile: state.join("Caddyfile"),
-        php,
-    };
-    write(
-        &plan.caddyfile,
-        caddyfile(&project, &o, port, &state, &plan.php),
-    )?;
-
-    let (php_bin, how) = match &plan.php {
+    let (php_bin, how) = match &php {
         Php::Fpm { bin, .. } => (
             bin,
             format!("php-fpm ondemand, maksimal {} pekerja", workers()),
         ),
         Php::Cgi { bin, .. } => (bin, format!("php-cgi, {} pekerja", cgi_workers())),
     };
-    let php_version = Command::new(php_bin)
-        .arg("-v")
-        .output()
-        .ok()
-        .and_then(|out| {
-            String::from_utf8_lossy(&out.stdout)
-                .split_whitespace()
-                .nth(1)
-                .map(str::to_owned)
+    let php_version = php_version(php_bin);
+    check_version(&settings, &php_version)?;
+
+    let run_workers: Vec<Task> = settings
+        .workers
+        .iter()
+        .map(|w| Task {
+            name: w.name.clone(),
+            run: w.run.clone(),
+            log: plain_log,
         })
-        .unwrap_or_else(|| "?".into());
+        .collect();
+    // Penjadwal Laravel menggantikan baris cron `* * * * * php artisan schedule:run`. Di mode
+    // dev ia diam kecuali diminta: tugas terjadwal tidak boleh jalan sendiri di laptop.
+    let schedule = match (project.kind, settings.scheduler) {
+        (Kind::Laravel, on) if on.unwrap_or(!dev) => Some(Task {
+            name: "schedule".into(),
+            run: "php artisan schedule:run".into(),
+            // Tiap menit Laravel melapor bahwa tidak ada yang perlu dijalankan; itu bukan berita.
+            log: |name, line| {
+                (!line.contains("No scheduled commands are ready to run"))
+                    .then(|| format!("[{name}] {line}"))
+            },
+        }),
+        (Kind::Laravel, _) | (_, None | Some(false)) => None,
+        (_, Some(true)) => {
+            say!("jamu: scheduler = true diabaikan: penjadwal baru tersedia untuk Laravel");
+            None
+        }
+    };
+    // PHP baris perintah hanya dicari bila ada yang membutuhkannya.
+    let env = if run_workers.is_empty() && schedule.is_none() {
+        Vec::new()
+    } else {
+        php_cli(&project.dir, &settings)?.env
+    };
+    let plan = Plan {
+        caddy,
+        caddyfile: state.join("Caddyfile"),
+        php,
+        dir: project.dir.clone(),
+        env,
+        workers: run_workers,
+        schedule,
+    };
+    write(
+        &plan.caddyfile,
+        caddyfile(&project, &o, port, &state, &plan.php),
+    )?;
+
     let rel_root = project
         .root
         .strip_prefix(&project.dir)
@@ -263,6 +237,12 @@ pub fn serve(o: Opts) -> Result<(), String> {
             .unwrap_or_default()
     );
     say!("jamu: konfigurasi di {}", state.display());
+    for w in &plan.workers {
+        say!("jamu: pekerja {}: {}", w.name, w.run);
+    }
+    if plan.schedule.is_some() {
+        say!("jamu: penjadwal Laravel aktif (schedule:run tiap menit)");
+    }
     warn_unwritable(&project);
 
     let stop = Arc::new(AtomicBool::new(false));

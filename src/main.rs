@@ -17,15 +17,18 @@ macro_rules! say {
     }};
 }
 
+mod cli;
 mod config;
 mod detect;
 #[cfg_attr(unix, path = "os_unix.rs")]
 #[cfg_attr(windows, path = "os_windows.rs")]
 mod os;
+mod paths;
 mod serve;
+mod settings;
 mod supervise;
 
-use detect::{detect, kind_name};
+use detect::kind_name;
 
 #[derive(Default)]
 pub struct Opts {
@@ -43,13 +46,17 @@ Pemakaian:
   jamu serve [DIR] [--port N]
   jamu serve [DIR] --domain NAMA [--email ALAMAT] [--acme-ca URL] [--acme-ca-root FILE]
   jamu serve [DIR] --behind-proxy [--port N]
+  jamu php [ARGUMEN...]
+  jamu composer [ARGUMEN...]
   jamu health [--port N]
   jamu detect [DIR]
 
 Tanpa opsi: HTTP di 127.0.0.1, port 8080 atau port bebas berikutnya.
 Dengan --domain: port 80 dan 443, sertifikat diterbitkan dan diperbarui otomatis.
 Dengan --behind-proxy: HTTP di semua antarmuka, port 8080, untuk container di belakang
-Traefik atau proxy lain yang mengurus HTTPS.";
+Traefik atau proxy lain yang mengurus HTTPS.
+`jamu php` dan `jamu composer` menjalankan PHP yang sama dengan yang melayani situs, di
+folder tempat perintah itu diketik.";
 
 fn parse_opts(args: &[String]) -> Result<Opts, String> {
     let mut o = Opts {
@@ -93,12 +100,19 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("serve") => parse_opts(&args[1..]).and_then(serve::serve),
         Some("health") => serve::health(&args[1..]),
-        Some("detect") => parse_opts(&args[1..]).map(|o| {
-            let p = detect(&o.dir);
-            println!("jenis: {}", kind_name(p.kind));
-            println!("document root: {}", p.root.display());
-            println!("php diminta: {}", p.php_wanted.as_deref().unwrap_or("-"));
-        }),
+        Some("php") => cli::php(&args[1..]),
+        Some("composer") => cli::composer(&args[1..]),
+        Some("detect") => parse_opts(&args[1..])
+            .and_then(|o| settings::load(&o.dir))
+            .map(|(p, s)| {
+                println!("jenis: {}", kind_name(p.kind));
+                println!("document root: {}", p.root.display());
+                let wanted = s.php.as_deref().or(p.php_wanted.as_deref());
+                println!("php diminta: {}", wanted.unwrap_or("-"));
+                for w in &s.workers {
+                    println!("pekerja {}: {}", w.name, w.run);
+                }
+            }),
         _ => Err(USAGE.to_string()),
     };
     match result {

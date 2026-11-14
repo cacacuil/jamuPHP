@@ -4,6 +4,8 @@
 set -u
 
 JAMU="${JAMU:-./target/release/jamu}"
+# Path mutlak: beberapa tes menjalankan jamu dari dalam folder situs.
+JAMU="$(cd "$(dirname "$JAMU")" && pwd)/$(basename "$JAMU")"
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) windows=1;; *) windows=0;; esac
 if [ "$windows" = 1 ]; then PHP_PROC="${PHP_PROC:-php-cgi.exe}"; else PHP_PROC="${PHP_PROC:-php-fpm}"; fi
 
@@ -112,6 +114,7 @@ EOF
   cat > "$htd/alir.php" <<'EOF'
 <?php header('Content-Type: text/plain'); for ($i = 1; $i <= 4; $i++) { echo "potongan $i\n"; @ob_flush(); flush(); usleep(500000); }
 EOF
+  printf '%s\n' '<?php error_log("JEJAK-LOG-E2E"); echo "ok";' > "$htd/catat.php"
   cat > "$htd/lambat.php" <<'EOF'
 <?php usleep(700000); echo 'selesai';
 EOF
@@ -223,6 +226,7 @@ EOF
   cek "upload 100 MB kode" "$r" 200
   cek "upload 100 MB isi" "$(cat "$work/up.out")" "100000000 $h"
   cek "upload 200 MB 413" "$(kode -F "berkas=@$work/besar-200.bin" "$B/upload.php")" 413
+  rm -f "$work/besar-100.bin" "$work/besar-200.bin" "$work/up.out"
   # 7. streaming: byte pertama cepat, total lambat
   local t ttfb total
   t=$(cu -o /dev/null -w '%{time_starttransfer} %{time_total}' "$B/alir.php")
@@ -235,6 +239,11 @@ EOF
   sleep 1.1
   printf '%s\n' '<?php echo "versi dua!";' > "$htd/ubah.php"
   cek "ubah.php langsung versi dua" "$(cu "$B/ubah.php")" "versi dua!"
+  # catatan galat PHP harus sampai ke log jamu
+  cek "catat.php 200" "$(kode "$B/catat.php")" 200
+  local ada=no
+  for _ in 1 2 3 4 5 6; do grep -q JEJAK-LOG-E2E "$log" && { ada=yes; break; }; sleep 0.5; done
+  cek "error_log() PHP muncul di log jamu" "$ada" yes
   # 8. konkurensi: 8 permintaan paralel
   local pids="" i ok=0
   for i in 1 2 3 4 5 6 7 8; do
@@ -290,8 +299,9 @@ grup_proxy() {
   mkdir -p "$site"
   cat > "$site/index.php" <<'EOF'
 <?php header('Content-Type: text/plain');
-echo 'https=', $_SERVER['HTTPS'] ?? '-', ' addr=', $_SERVER['REMOTE_ADDR'], ' proxy=', $_SERVER['HTTP_PROXY'] ?? '-', "\n";
+echo 'https=', $_SERVER['HTTPS'] ?? '-', ' addr=', $_SERVER['REMOTE_ADDR'], ' proxy=', $_SERVER['HTTP_PROXY'] ?? '-', ' limit=', ini_get('memory_limit'), "\n";
 EOF
+  printf '%s\n' '# RAHASIA-TOML' '[ini]' 'memory_limit = "200M"' > "$site/jamu.toml"
   if ! start_jamu "$site" 8104 "$log" --behind-proxy; then
     cek "jamu siap (proxy)" no yes "jamu tidak menampilkan 'jamu: siap' dalam 40 detik"
     stop_jamu; akhir_grup "$log"; return
@@ -305,15 +315,125 @@ EOF
   l=$(cu -H 'X-Forwarded-For: 198.51.100.1, 203.0.113.9' "$B/")
   cek "X-Forwarded-For palsu di depan diabaikan" "$(has "$l" 'addr=203.0.113.9')" yes "$l"
   bocor "header Proxy dibuang (httpoxy)" jahat -H 'Proxy: http://jahat.invalid:1' "$B/"
+  # jamu.toml ada di document root situs ini: pengaturannya dipakai, filenya tidak tersaji.
+  cek "[ini] dari jamu.toml dipakai" "$(has "$(cu "$B/")" 'limit=200M')" yes
+  local u
+  for u in /jamu.toml /JAMU.TOML /jamu.toml. /jamu.toml%20; do
+    bocor "$u tidak tersaji" RAHASIA-TOML "$B$u"
+  done
+  cek "/jamu.toml 404" "$(kode "$B/jamu.toml")" 404
   stop_jamu
+  akhir_grup "$log"
+}
+
+# Jalankan jamu yang seharusnya menolak: gagal_start NAMA TEKS DIR [OPSI...]
+# Lulus bila ia keluar sendiri dengan kode bukan nol dan pesannya memuat TEKS.
+gagal_start() {
+  local nama=$1 teks=$2 rc; shift 2
+  timeout 20 "$JAMU" "$@" > "$work/tolak.log" 2>&1; rc=$?
+  cek "$nama: keluar dengan galat" "$([ "$rc" -ne 0 ] && [ "$rc" -ne 124 ] && echo yes || echo no)" yes "kode keluar $rc"
+  cek "$nama: pesan memuat '$teks'" "$(has "$(cat "$work/tolak.log")" "$teks")" yes "$(head -c 300 "$work/tolak.log")"
+}
+
+grup_toml() {
+  echo "== jamu.toml, pekerja, jamu php =="
+  local site="$work/toml" log="$work/toml.log" B=http://127.0.0.1:8105 d r n1 n2 pid baru
+  mkdir -p "$site/umum" "$site/salah"
+  printf '%s\n' '<?php echo "root-proyek";' > "$site/index.php"
+  printf '%s\n' '<?php echo "limit=", ini_get("memory_limit"), " tz=", ini_get("date.timezone");' > "$site/umum/index.php"
+  cat > "$site/pekerja.php" <<'EOF'
+<?php while (true) { file_put_contents(__DIR__ . '/pekerja.log', getmypid() . ' ' . ini_get('date.timezone') . "\n", FILE_APPEND); usleep(200000); }
+EOF
+  cat > "$site/jamu.toml" <<'EOF'
+root = "umum"
+
+[ini]
+memory_limit = "300M"
+"date.timezone" = "Asia/Jakarta"
+
+[[worker]]
+name = "catat"
+run = "php pekerja.php"
+EOF
+  d=$("$JAMU" detect "$site" 2>&1)
+  cek "detect: root dari jamu.toml" "$(has "$d" umum)" yes "$d"
+  cek "detect: pekerja disebut" "$(has "$d" 'pekerja catat')" yes "$d"
+
+  # yang salah ditolak sebelum apa pun dinyalakan
+  printf '%s\n' '<?php echo 1;' > "$site/salah/index.php"
+  printf '%s\n' 'rot = "umum"' > "$site/salah/jamu.toml"
+  gagal_start "kunci tidak dikenal" rot detect "$site/salah"
+  printf '%s\n' 'root = ".."' > "$site/salah/jamu.toml"
+  gagal_start "root di luar project" 'di dalam project' detect "$site/salah"
+  printf '%s\n' 'php = "7.4"' > "$site/salah/jamu.toml"
+  gagal_start "versi PHP tidak cocok" 'PHP 7.4' serve "$site/salah" --port 8106
+  r=$(cd "$site/salah" && "$JAMU" php -r 'echo "jalan";' 2>&1)
+  cek "jamu php menolak versi yang tidak cocok" "$(has "$r" 'PHP 7.4')" yes "$r"
+
+  if ! start_jamu "$site" 8105 "$log"; then
+    cek "jamu siap (toml)" no yes "jamu tidak menampilkan 'jamu: siap' dalam 40 detik"
+    stop_jamu; akhir_grup "$log"; return
+  fi
+  r=$(cu "$B/")
+  cek "root dari jamu.toml disajikan" "$(has "$r" 'limit=')" yes "$r"
+  cek "[ini] memory_limit dipakai web" "$(has "$r" 'limit=300M')" yes "$r"
+  cek "[ini] date.timezone dipakai web" "$(has "$r" 'tz=Asia/Jakarta')" yes "$r"
+  # pekerja berjalan, memakai PHP dan pengaturan yang sama
+  for _ in $(seq 1 20); do [ -s "$site/pekerja.log" ] && break; sleep 0.5; done
+  cek "pekerja berjalan" "$([ -s "$site/pekerja.log" ] && echo yes || echo no)" yes
+  cek "pekerja memakai [ini]" "$(has "$(head -1 "$site/pekerja.log")" Asia/Jakarta)" yes "$(head -1 "$site/pekerja.log")"
+  # pekerja yang mati dinyalakan ulang
+  pid=$(tail -1 "$site/pekerja.log" | cut -d' ' -f1)
+  if [ "$windows" = 1 ]; then taskkill //F //PID "$pid" > /dev/null; else kill -9 "$pid"; fi
+  baru=no
+  for _ in $(seq 1 20); do
+    n1=$(tail -1 "$site/pekerja.log" | cut -d' ' -f1)
+    [ -n "$n1" ] && [ "$n1" != "$pid" ] && { baru=yes; break; }
+    sleep 0.5
+  done
+  cek "pekerja yang mati dinyalakan ulang" "$baru" yes
+  # jamu php dan jamu composer: PHP yang sama, dari folder project
+  r=$(cd "$site" && "$JAMU" php -r 'echo ini_get("memory_limit"), " ", ini_get("date.timezone"), " ", extension_loaded("mbstring") ? "mb" : "tanpa-mb";' 2>&1)
+  cek "jamu php memakai [ini]" "$(has "$r" 'Asia/Jakarta')" yes "$r"
+  cek "jamu php memakai memory_limit dari [ini]" "$(has "$r" '300M')" yes "$r"
+  cek "jamu php: ekstensi aktif" "$(has "$r" ' mb')" yes "$r"
+  (cd "$site" && "$JAMU" php -r 'exit(7);'); r=$?
+  cek "jamu php meneruskan kode keluar" "$r" 7
+  r=$(cd "$site" && "$JAMU" composer --version 2>&1)
+  cek "jamu composer berjalan" "$(has "$r" 'Composer')" yes "$r"
+  # berhenti: pekerja ikut berhenti
+  stop_jamu
+  n1=$(wc -l < "$site/pekerja.log"); sleep 1; n2=$(wc -l < "$site/pekerja.log")
+  cek "stop: pekerja ikut berhenti" "$n1" "$n2"
   akhir_grup "$log"
 }
 
 grup_laravel() {
   echo "== laravel =="
   if [ -z "${LARAVEL_DIR:-}" ]; then echo "lewati: laravel (LARAVEL_DIR tidak diset)"; return; fi
-  local log="$work/laravel.log" B=http://127.0.0.1:8102 jar="$work/laravel.jar" s1 s2
-  if ! start_jamu "$LARAVEL_DIR" 8102 "$log"; then
+  local lar="$work/laravel" log="$work/laravel.log" B=http://127.0.0.1:8102 jar="$work/laravel.jar" s1 s2
+  # Salinan, supaya project sumber tidak berubah. Ditambah satu tugas antrean, satu tugas
+  # terjadwal, dan jamu.toml yang menyalakan pekerja antrean serta penjadwal di mode dev.
+  cp -a "$LARAVEL_DIR" "$lar"
+  cat >> "$lar/routes/web.php" <<'EOF'
+Route::get('/uji-antre', function () {
+    dispatch(
+        function () { file_put_contents(storage_path('antre.txt'), 'selesai'); }
+    );
+    return 'masuk-antrean';
+});
+EOF
+  cat >> "$lar/routes/console.php" <<'EOF'
+\Illuminate\Support\Facades\Schedule::call(function () { file_put_contents(storage_path('jadwal.txt'), "x\n", FILE_APPEND); })->everyMinute();
+EOF
+  cat > "$lar/jamu.toml" <<'EOF'
+scheduler = true
+
+[[worker]]
+name = "queue"
+run = "php artisan queue:work --tries=1"
+EOF
+  if ! start_jamu "$lar" 8102 "$log"; then
     cek "jamu siap (laravel)" no yes "jamu tidak menampilkan 'jamu: siap' dalam 40 detik"
     stop_jamu; akhir_grup "$log"; return
   fi
@@ -326,10 +446,14 @@ grup_laravel() {
   cek "uji-sesi kedua" "$s2" '{"n":2}'
   cek "/tidak-ada 404" "$(kode "$B/tidak-ada")" 404
   cek "/.env 404" "$(kode "$B/.env")" 404
+  # pekerja antrean dari jamu.toml mengerjakan tugas yang dikirim dari web
+  cek "/uji-antre masuk antrean" "$(cu "$B/uji-antre")" masuk-antrean
+  for _ in $(seq 1 40); do [ -s "$lar/storage/antre.txt" ] && break; sleep 0.5; done
+  cek "pekerja antrean mengerjakan tugas" "$(cat "$lar/storage/antre.txt" 2>/dev/null)" selesai
   # Hanya public/index.php yang dijalankan: berkas .php lain di public tidak pernah jalan.
-  printf '%s\n' '<?php echo 6 * 7, "-jalan";' > "$LARAVEL_DIR/public/lain.php"
-  mkdir -p "$LARAVEL_DIR/public/sub"
-  printf '%s\n' '<?php echo 6 * 7, "-jalan";' > "$LARAVEL_DIR/public/sub/index.php"
+  printf '%s\n' '<?php echo 6 * 7, "-jalan";' > "$lar/public/lain.php"
+  mkdir -p "$lar/public/sub"
+  printf '%s\n' '<?php echo 6 * 7, "-jalan";' > "$lar/public/sub/index.php"
   local u
   for u in /lain.php /lain.php/x /LAIN.PHP /lain.php. /lain.php%20 /sub/ /sub/index.php; do
     bocor "$u tidak dijalankan" 42-jalan "$B$u"
@@ -338,7 +462,9 @@ grup_laravel() {
   cek "/lain.php 404 dari Laravel" "$(kode "$B/lain.php")" 404
   cek "/index.php/up 200" "$(kode "$B/index.php/up")" 200
   cek "/robots.txt 200" "$(kode "$B/robots.txt")" 200
-  rm -f "$LARAVEL_DIR/public/lain.php" "$LARAVEL_DIR/public/sub/index.php"; rmdir "$LARAVEL_DIR/public/sub"
+  # penjadwal: tugas tiap menit jalan tanpa cron (paling lama menunggu satu pergantian menit)
+  for _ in $(seq 1 150); do [ -s "$lar/storage/jadwal.txt" ] && break; sleep 0.5; done
+  cek "penjadwal menjalankan tugas tiap menit" "$([ -s "$lar/storage/jadwal.txt" ] && echo yes || echo no)" yes
   stop_jamu
   akhir_grup "$log"
 }
@@ -394,9 +520,15 @@ grup_wp() {
 
 grup_php
 grup_proxy
+grup_toml
 grup_laravel
 grup_wp
 
 echo "$lulus lulus, $gagal gagal"
-echo "direktori kerja: $work"
-[ "$gagal" -eq 0 ]
+# Folder kerja hanya berguna untuk memeriksa kegagalan; bila semua lulus, dibuang.
+if [ "$gagal" -eq 0 ]; then
+  rm -rf "$work"
+else
+  echo "direktori kerja: $work"
+  exit 1
+fi

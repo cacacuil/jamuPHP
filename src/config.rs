@@ -1,11 +1,13 @@
 //! Isi konfigurasi yang dibangkitkan: Caddyfile, php-fpm.conf, dan php.ini untuk php-cgi.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::thread;
 
 use crate::Opts;
 use crate::detect::{Kind, Project};
 use crate::os;
+use crate::supervise::LogLine;
 
 /// Cara PHP dijalankan.
 pub enum Php {
@@ -25,10 +27,25 @@ pub enum Php {
     },
 }
 
+/// Perintah yang dijalankan shell di folder project: pekerja atau tugas terjadwal.
+pub struct Task {
+    pub name: String,
+    pub run: String,
+    pub log: LogLine,
+}
+
 pub struct Plan {
     pub caddy: PathBuf,
     pub caddyfile: PathBuf,
     pub php: Php,
+    /// Folder project: tempat pekerja dan tugas terjadwal dijalankan.
+    pub dir: PathBuf,
+    /// Lingkungan untuk pekerja dan tugas terjadwal, supaya `php` di sana adalah PHP project.
+    pub env: Vec<(OsString, OsString)>,
+    /// Proses latar dari `jamu.toml`, diawasi seperti Caddy dan PHP.
+    pub workers: Vec<Task>,
+    /// Dijalankan di setiap pergantian menit.
+    pub schedule: Option<Task>,
 }
 
 /// Dijawab php-fpm sendiri ("pong"), tanpa menjalankan kode situs. Caddy hanya meneruskannya
@@ -57,7 +74,31 @@ pub fn cgi_workers() -> usize {
         .clamp(4, 8)
 }
 
-pub fn fpm_conf(sock: &Path, dev: bool) -> String {
+/// Pengaturan PHP yang ditetapkan jamu, sama di dev dan production kecuali soal menampilkan
+/// galat, lalu ditimpa `[ini]` dari jamu.toml.
+fn php_settings(dev: bool, user: &[(String, String)]) -> Vec<(String, String)> {
+    let mut all: Vec<(String, String)> = [
+        ("memory_limit", "256M"),
+        ("upload_max_filesize", "128M"),
+        ("post_max_size", "128M"),
+        ("display_errors", if dev { "On" } else { "Off" }),
+        ("log_errors", "On"),
+    ]
+    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+    .into();
+    if dev {
+        all.push(("opcache.revalidate_freq".into(), DEV_REVALIDATE.to_string()));
+    }
+    for (k, v) in user {
+        match all.iter_mut().find(|(name, _)| name == k) {
+            Some(slot) => slot.1 = v.clone(),
+            None => all.push((k.clone(), v.clone())),
+        }
+    }
+    all
+}
+
+pub fn fpm_conf(sock: &Path, dev: bool, user: &[(String, String)]) -> String {
     let mut s = String::new();
     s += "[global]\nerror_log = /proc/self/fd/2\ndaemonize = no\n\n[www]\n";
     if os::is_root() {
@@ -70,15 +111,8 @@ pub fn fpm_conf(sock: &Path, dev: bool) -> String {
     );
     s += "catch_workers_output = yes\ndecorate_workers_output = no\nclear_env = no\n";
     s += &format!("ping.path = {PING_PATH}\n");
-    s += "php_admin_value[memory_limit] = 256M\n";
-    s += "php_admin_value[upload_max_filesize] = 128M\n";
-    s += "php_admin_value[post_max_size] = 128M\n";
-    s += &format!(
-        "php_admin_flag[display_errors] = {}\n",
-        if dev { "on" } else { "off" }
-    );
-    if dev {
-        s += &format!("php_admin_value[opcache.revalidate_freq] = {DEV_REVALIDATE}\n");
+    for (k, v) in php_settings(dev, user) {
+        s += &format!("php_admin_value[{k}] = {v}\n");
     }
     s
 }
@@ -133,15 +167,24 @@ fn windows_ini(php_dir: &Path) -> String {
 
 /// php-cgi tidak punya `php_admin_value` seperti php-fpm, jadi pengaturannya lewat php.ini
 /// yang dibangkitkan dan ditunjuk dengan `-c`.
-pub fn cgi_ini(bin: &Path, dev: bool) -> String {
-    let mut s =
-        String::from("memory_limit = 256M\nupload_max_filesize = 128M\npost_max_size = 128M\n");
-    s += &format!(
-        "display_errors = {}\nlog_errors = On\n",
-        if dev { "On" } else { "Off" }
-    );
-    if dev {
-        s += &format!("opcache.revalidate_freq = {DEV_REVALIDATE}\n");
+pub fn cgi_ini(bin: &Path, dev: bool, user: &[(String, String)]) -> String {
+    let mut s = String::new();
+    for (k, v) in php_settings(dev, user) {
+        s += &format!("{k} = {v}\n");
+    }
+    if cfg!(windows) {
+        s += &windows_ini(bin.parent().unwrap_or(Path::new(".")));
+    }
+    s
+}
+
+/// php.ini tambahan untuk PHP di baris perintah (pekerja, penjadwal, `jamu php`): `[ini]`
+/// dari jamu.toml, dan di Windows juga ekstensi dan daftar CA. Batas untuk web (memori,
+/// ukuran unggahan) tidak ikut: Composer dan pekerja antrean punya kebutuhan sendiri.
+pub fn cli_ini(bin: &Path, user: &[(String, String)]) -> String {
+    let mut s = String::new();
+    for (k, v) in user {
+        s += &format!("{k} = {v}\n");
     }
     if cfg!(windows) {
         s += &windows_ini(bin.parent().unwrap_or(Path::new(".")));
@@ -243,6 +286,9 @@ pub fn caddyfile(p: &Project, o: &Opts, port: u16, state: &Path, php: &Php) -> S
     // Dotfile (.env, .git, .htaccess) tidak pernah disajikan, kecuali .well-known.
     s += "\t@hidden {\n\t\tpath_regexp (^|/)\\.\n\t\tnot path /.well-known/*\n\t}\n";
     route += "\t\trespond @hidden 404\n";
+    // jamu.toml ikut berada di document root bila root-nya folder project itu sendiri.
+    s += "\t@jamu_toml path_regexp (?i)^/jamu\\.toml[.\\x20]*$\n";
+    route += "\t\trespond @jamu_toml 404\n";
     if p.kind == Kind::WordPress {
         // Windows mengabaikan titik dan spasi di ujung nama file, jadi `x.php.` adalah `x.php`.
         // Spasi ditulis \x20 karena spasi biasa memotong token di Caddyfile.
@@ -268,6 +314,11 @@ pub fn caddyfile(p: &Project, o: &Opts, port: u16, state: &Path, php: &Php) -> S
     // flush_interval -1: keluaran PHP diteruskan saat itu juga, tidak ditampung dulu.
     // Tanpa ini respons yang dialirkan (SSE, unduhan yang dibangkitkan) baru tiba setelah selesai.
     let mut opts = String::from("\t\t\tflush_interval -1\n");
+    if let Php::Cgi { .. } = php {
+        // php-cgi mengirim catatan galatnya lewat FastCGI, dan Caddy membuangnya kecuali
+        // diminta. php-fpm menulisnya ke log sendiri, yang sudah diteruskan jamu.
+        opts += "\t\t\tcapture_stderr\n";
+    }
     if p.kind == Kind::Laravel {
         // Bawaan Caddy juga mencoba {path}/index.php, yang akan menjalankan index.php di subfolder.
         opts += "\t\t\ttry_files {path} index.php\n";

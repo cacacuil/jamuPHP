@@ -65,10 +65,31 @@ pub fn prepare(cmd: &mut Command) {
     cmd.creation_flags(0x0000_0200);
 }
 
+/// Windows tidak bisa mengganti proses, jadi perintahnya dijalankan sebagai anak, ditunggu,
+/// lalu kode keluarnya diteruskan. Hanya kembali bila gagal, dengan alasannya.
+pub fn replace_process(mut cmd: Command) -> String {
+    match cmd.status() {
+        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+        Err(e) => format!(
+            "{} tidak bisa dijalankan: {e}",
+            cmd.get_program().to_string_lossy()
+        ),
+    }
+}
+
+/// Perintah satu baris dari `jamu.toml`, dijalankan cmd. `raw_arg`: cmd membaca baris
+/// perintahnya dengan aturan sendiri, jadi teksnya diteruskan apa adanya.
+pub fn shell(run: &str) -> Command {
+    let mut c = Command::new("cmd");
+    c.arg("/C").raw_arg(run);
+    c
+}
+
 /// Windows tidak punya sinyal. Caddy mengartikan Ctrl-Break sebagai permintaan berhenti
-/// dengan rapi; php-cgi langsung dimatikan, dan Job Object miliknya ikut mematikan pekerjanya.
+/// dengan rapi, dan Ctrl-Break sampai ke seluruh grup proses sebuah pekerja. php-cgi
+/// langsung dimatikan, dan Job Object miliknya ikut mematikan pekerjanya.
 pub fn ask_to_stop(child: &mut Child, how: Stop) {
-    let asked = matches!(how, Stop::Term)
+    let asked = matches!(how, Stop::Term | Stop::Group)
         && unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, child.id()) } != 0;
     if !asked {
         let _ = child.kill();

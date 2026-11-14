@@ -56,12 +56,33 @@ pub fn prepare(cmd: &mut Command) {
 
 pub fn init() {}
 
+/// Mengganti proses ini dengan perintah lain: sinyal, terminal, dan kode keluar langsung
+/// menjadi milik perintah itu. Hanya kembali bila gagal, dengan alasannya.
+pub fn replace_process(mut cmd: Command) -> String {
+    let e = cmd.exec();
+    format!(
+        "{} tidak bisa dijalankan: {e}",
+        cmd.get_program().to_string_lossy()
+    )
+}
+
+/// Perintah satu baris dari `jamu.toml`, dijalankan shell.
+pub fn shell(run: &str) -> Command {
+    let mut c = Command::new("sh");
+    c.arg("-c").arg(run);
+    c
+}
+
 pub fn ask_to_stop(child: &mut Child, how: Stop) {
-    let sig = match how {
-        Stop::Term => libc::SIGTERM,
-        Stop::Quit => libc::SIGQUIT,
+    let pid = child.id() as i32;
+    let (target, sig) = match how {
+        Stop::Term => (pid, libc::SIGTERM),
+        Stop::Quit => (pid, libc::SIGQUIT),
+        // Setiap anak memimpin grup prosesnya sendiri (lihat `prepare`); pid negatif berarti
+        // seluruh grup, yaitu shell dan perintah yang dijalankannya.
+        Stop::Group => (-pid, libc::SIGTERM),
     };
-    unsafe { libc::kill(child.id() as i32, sig) };
+    unsafe { libc::kill(target, sig) };
 }
 
 /// Mematikan seluruh grup proses, termasuk anak yang tertinggal.
