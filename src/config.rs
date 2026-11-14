@@ -360,12 +360,26 @@ pub fn caddyfile(
 ) -> String {
     let mut s = String::from("{\n\tadmin off\n\tpersist_config off\n");
     s += &format!("\tstorage file_system {}\n", q(&state.join("caddy")));
-    if o.domains.is_empty() {
-        s += "\tlog {\n\t\tlevel WARN\n\t}\n";
-    } else {
+    // Pencatat yang dikeluarkan dari log utama.
+    let mut exclude = Vec::new();
+    if !o.domains.is_empty() {
+        exclude.extend(["tls.obtain", "tls.renew"]);
+    }
+    if let Php::Fpm { .. } = php {
+        // Transport FastCGI menyiapkan catatan untuk tiap permintaan (seluruh header dan
+        // variabel lingkungan) walau tidak ada yang ditulis: terukur 6-8% CPU Caddy di jalur
+        // PHP. Tanpa log yang memuatnya, ongkos itu hilang. php-fpm menulis galat PHP ke
+        // log-nya sendiri; php-cgi mengirimnya lewat pencatat ini, jadi di sana tetap dipakai.
+        exclude.push("http.reverse_proxy.transport.fastcgi");
+    }
+    s += "\tlog {\n\t\tlevel WARN\n";
+    if !exclude.is_empty() {
+        s += &format!("\t\texclude {}\n", exclude.join(" "));
+    }
+    s += "\t}\n";
+    if !o.domains.is_empty() {
         // Terbit dan diperpanjangnya sertifikat adalah berita, walau Caddy mencatatnya sebagai
         // INFO. Supervisor meringkas baris-baris ini dan membuang sisanya.
-        s += "\tlog {\n\t\tlevel WARN\n\t\texclude tls.obtain tls.renew\n\t}\n";
         s += "\tlog sertifikat {\n\t\tlevel INFO\n\t\tinclude tls.obtain tls.renew\n\t\tformat json\n\t}\n";
     }
     if o.domains.is_empty() {
@@ -462,9 +476,12 @@ pub fn caddyfile(
         s += &matchers;
         route += &rule;
     }
-    // flush_interval -1: keluaran PHP diteruskan saat itu juga, tidak ditampung dulu.
-    // Tanpa ini respons yang dialirkan (SSE, unduhan yang dibangkitkan) baru tiba setelah selesai.
-    let mut opts = String::from("\t\t\tflush_interval -1\n");
+    // Keluaran PHP diteruskan paling lambat 20 ms sesudah ditulis. Tanpa flush_interval,
+    // respons yang dialirkan (unduhan yang dibangkitkan, keluaran bertahap) baru tiba setelah
+    // selesai. Dengan -1 (di setiap tulisan) pemampat ikut dikuras di setiap potongan: terukur
+    // 20-25% CPU Caddy lebih mahal untuk halaman 60 KB. SSE tetap diteruskan saat itu juga;
+    // Caddy mengenalinya dari Content-Type.
+    let mut opts = String::from("\t\t\tflush_interval 20ms\n");
     if let Some(t) = limits.timeout {
         // Dihitung sejak permintaan diteruskan ke PHP. Jawabannya 504, bukan 502, supaya
         // terbedakan dari PHP yang mati.
@@ -712,6 +729,58 @@ mod tests {
         );
         assert!(text.contains("output stderr"));
         assert!(text.contains("log_skip @ping"));
+    }
+
+    #[test]
+    fn caddyfile_jalur_php_tidak_membayar_ongkos_per_permintaan_yang_tidak_perlu() {
+        let dir = project(&["index.php"]);
+        let text = |o: Opts, php: &Php| {
+            caddyfile(
+                &detect(&dir),
+                &o,
+                8080,
+                Path::new("/s"),
+                php,
+                Limits::default(),
+            )
+        };
+        let opts = || Opts {
+            dir: dir.clone(),
+            ..Default::default()
+        };
+        const FASTCGI: &str = "http.reverse_proxy.transport.fastcgi";
+
+        // Keluaran PHP dikirim paling lambat 20 ms sesudah ditulis, tidak di setiap tulisan.
+        let dev = text(opts(), &fpm());
+        assert!(dev.contains("\t\t\tflush_interval 20ms\n"));
+        assert!(!dev.contains("flush_interval -1"));
+        // Pencatat transport FastCGI dikeluarkan dari log utama, di semua mode.
+        assert!(dev.contains(&format!(
+            "\tlog {{\n\t\tlevel WARN\n\t\texclude {FASTCGI}\n\t}}\n"
+        )));
+        let domain = text(
+            Opts {
+                domains: vec!["situs.test".into()],
+                ..opts()
+            },
+            &fpm(),
+        );
+        assert!(domain.contains(&format!("\t\texclude tls.obtain tls.renew {FASTCGI}\n")));
+        // Pencatat khusus sertifikat tidak ikut memuatnya.
+        assert!(domain.contains("\t\tinclude tls.obtain tls.renew\n"));
+
+        // php-cgi mengirim catatan galat PHP lewat pencatat itu, jadi di sana tetap dipakai.
+        let cgi = text(
+            opts(),
+            &Php::Cgi {
+                bin: "php-cgi".into(),
+                ini: "/s/php.ini".into(),
+                port: 50123,
+            },
+        );
+        assert!(cgi.contains("capture_stderr"));
+        assert!(!cgi.contains(FASTCGI));
+        assert!(cgi.contains("flush_interval 20ms"));
     }
 
     #[test]
