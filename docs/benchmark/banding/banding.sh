@@ -39,7 +39,12 @@ server_untuk() { # APP
 ms() { date +%s%3N; }
 kode() { curl -s -o /dev/null --noproxy '*' -m 3 -w '%{http_code}' "$1" || true; }
 berhenti() { docker rm -f b-uji >/dev/null 2>&1 || true; }
-gagal() { echo "GAGAL: $*" >&2; docker logs b-uji 2>&1 | tail -15 >&2 || true; exit 1; }
+# Log akses dibuang dari cuplikan: yang dicari adalah pesan galat servernya.
+gagal() {
+  echo "GAGAL: $*" >&2
+  docker logs b-uji 2>&1 | grep -v '"logger":"http.log' | tail -30 | cut -c1-400 >&2 || true
+  exit 1
+}
 
 # Halaman yang diukur per aplikasi, dengan teks yang harus ada di jawabannya.
 halaman() {
