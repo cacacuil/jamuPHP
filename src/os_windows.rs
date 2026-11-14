@@ -21,6 +21,11 @@ pub fn is_root() -> bool {
 
 /// `canonicalize` di Windows menghasilkan `\\?\C:\...`. Caddy dan PHP tidak mengerti
 /// awalan itu, jadi dibuang untuk path drive biasa.
+/// Windows hanya sasaran dev: tidak ada batas memori container yang perlu diikuti.
+pub fn memory_limit() -> Option<u64> {
+    None
+}
+
 pub fn tidy(p: PathBuf) -> PathBuf {
     match p.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
         Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),

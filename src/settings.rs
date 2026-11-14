@@ -23,6 +23,8 @@ pub struct Settings {
     pub root: Option<String>,
     /// Penjadwal Laravel (`schedule:run` tiap menit). Bawaan: menyala kecuali di mode dev.
     pub scheduler: Option<bool>,
+    /// Batas waktu satu permintaan PHP, dalam detik. 0 berarti tanpa batas.
+    timeout: Option<u64>,
     /// Pengaturan php.ini untuk project ini.
     #[serde(default)]
     ini: BTreeMap<String, toml::Value>,
@@ -41,7 +43,16 @@ pub struct Worker {
 /// Nama yang dipakai jamu sendiri sebagai awalan baris log.
 const RESERVED: &[&str] = &["jamu", "caddy", "php-fpm", "php-cgi", "schedule"];
 
+/// Batas waktu bawaan satu permintaan PHP. Cukup longgar untuk pembaruan plugin dan impor,
+/// cukup ketat supaya permintaan yang menggantung tidak menyandera pekerja selamanya.
+const TIMEOUT: u64 = 300;
+
 impl Settings {
+    /// Batas waktu satu permintaan PHP dalam detik; `None` berarti tanpa batas.
+    pub fn timeout(&self) -> Option<u64> {
+        Some(self.timeout.unwrap_or(TIMEOUT)).filter(|t| *t > 0)
+    }
+
     /// Pengaturan php.ini sebagai pasangan nama dan nilai, siap ditulis.
     pub fn ini(&self) -> Vec<(String, String)> {
         self.ini
@@ -175,6 +186,7 @@ mod tests {
             php = "8.4"
             root = "web"
             scheduler = false
+            timeout = 600
 
             [ini]
             memory_limit = "512M"
@@ -191,6 +203,10 @@ mod tests {
         assert_eq!(s.php.as_deref(), Some("8.4"));
         assert_eq!(s.root.as_deref(), Some("web"));
         assert_eq!(s.scheduler, Some(false));
+        assert_eq!(s.timeout(), Some(600));
+        assert_eq!(Settings::default().timeout(), Some(300));
+        assert_eq!(parse("timeout = 0").unwrap().timeout(), None);
+        assert!(parse("timeout = -5").is_err());
         let ini = s.ini();
         let get = |k: &str| {
             ini.iter()

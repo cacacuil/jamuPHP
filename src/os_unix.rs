@@ -18,6 +18,22 @@ pub fn tidy(p: PathBuf) -> PathBuf {
     p
 }
 
+/// Isi berkas batas memori cgroup. "max" (v2) dan angka raksasa (v1) berarti tanpa batas.
+fn cgroup_limit(text: &str) -> Option<u64> {
+    text.trim().parse::<u64>().ok().filter(|n| *n < 1 << 60)
+}
+
+/// Batas memori container tempat proses ini berjalan, bila ada.
+pub fn memory_limit() -> Option<u64> {
+    [
+        "/sys/fs/cgroup/memory.max",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+    ]
+    .iter()
+    .find_map(|f| fs::read_to_string(f).ok())
+    .and_then(|text| cgroup_limit(&text))
+}
+
 /// Folder state berada di luar project, supaya tidak ikut tersaji dan tidak mengotori repo.
 pub fn state_base() -> PathBuf {
     env::var_os("XDG_STATE_HOME")
@@ -161,4 +177,17 @@ pub fn port_holder(port: u16) -> String {
         }
     }
     String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batas_memori_cgroup_terbaca() {
+        assert_eq!(cgroup_limit("268435456\n"), Some(268435456));
+        assert_eq!(cgroup_limit("max\n"), None);
+        assert_eq!(cgroup_limit("9223372036854771712\n"), None);
+        assert_eq!(cgroup_limit(""), None);
+    }
 }

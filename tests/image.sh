@@ -45,6 +45,11 @@ surat=$(docker run --rm -w /tmp --entrypoint jamu \
   php -r 'echo mail("a@contoh.test", "uji", "isi", "From: b@contoh.test") ? "terkirim" : "ditolak";' 2>&1 || true)
 [[ $surat == *"gagal: cannot connect"* && $surat == *ditolak ]] || fail "mode teruskan email: $surat"
 
+# Jumlah pekerja mengikuti batas memori container (64 MB per pekerja), bukan hanya jumlah core.
+harap=$(( $(nproc) * 2 )); [ "$harap" -gt 6 ] && harap=6; [ "$harap" -lt 4 ] && harap=4
+kecil=$(docker run --rm --memory 384m -v "$site:/app:ro" --entrypoint sh "$image" -c 'timeout 3 jamu serve /app --behind-proxy 2>&1; true')
+[[ $kecil == *"maksimal $harap pekerja (batas memori 384 MB)"* ]] || fail "pekerja tidak mengikuti batas memori: $kecil"
+
 body=$(get "$url/")
 [[ $body == https=tidak* ]] || fail "halaman utama: $body"
 [[ $body == *" uid=0 "* ]] && fail "PHP berjalan sebagai root"

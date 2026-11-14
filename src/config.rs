@@ -58,13 +58,43 @@ pub const PING_PATH: &str = "/-/jamu/ping";
 /// seperti "sudah disimpan tapi halamannya belum berubah", jadi diperiksa di setiap permintaan.
 const DEV_REVALIDATE: u8 = 0;
 
+/// Memori yang disisihkan untuk satu pekerja PHP saat menghitung jumlahnya. Terukur: pekerja
+/// WordPress dan Laravel memakai 15-45 MB; angka ini sudah termasuk bagian Caddy dan opcache.
+const WORKER_MEMORY: u64 = 64 << 20;
+
+/// Dua kali jumlah core, tetapi tidak lebih dari yang muat di memori container. Minimal 4
+/// supaya permintaan WordPress ke dirinya sendiri tidak macet.
+fn workers_for(cores: usize, memory: Option<u64>) -> usize {
+    let by_memory = memory.map_or(usize::MAX, |m| (m / WORKER_MEMORY) as usize);
+    (cores * 2).min(by_memory).max(4)
+}
+
 pub fn workers() -> usize {
-    // Dua kali jumlah core, minimal 4 supaya permintaan WordPress ke dirinya sendiri tidak macet.
-    (thread::available_parallelism()
+    let cores = thread::available_parallelism()
         .map(|n| n.get())
-        .unwrap_or(2)
-        * 2)
-    .max(4)
+        .unwrap_or(2);
+    workers_for(cores, os::memory_limit())
+}
+
+/// Ukuran gaya php.ini ("128M", "1G", "2048") dalam byte.
+fn php_bytes(v: &str) -> Option<u64> {
+    let v = v.trim();
+    let unit = match v.chars().last()?.to_ascii_lowercase() {
+        'k' => 1 << 10,
+        'm' => 1 << 20,
+        'g' => 1 << 30,
+        _ => 1u64,
+    };
+    let digits = if unit == 1 { v } else { &v[..v.len() - 1] };
+    digits.trim().parse::<u64>().ok()?.checked_mul(unit)
+}
+
+/// Batas ukuran body permintaan: `post_max_size` yang berlaku, supaya Caddy dan PHP menolak
+/// di angka yang sama. `None` bila PHP sendiri tidak membatasi atau nilainya tidak terbaca.
+pub fn body_limit(dev: bool, user: &[(String, String)]) -> Option<u64> {
+    let all = php_settings(dev, user);
+    let (_, v) = all.iter().find(|(k, _)| k == "post_max_size")?;
+    php_bytes(v).filter(|n| *n > 0)
 }
 
 /// Pekerja php-cgi selalu hidup semua (tidak ada ondemand) dan masing-masing memakai
@@ -100,7 +130,7 @@ fn php_settings(dev: bool, user: &[(String, String)]) -> Vec<(String, String)> {
     all
 }
 
-pub fn fpm_conf(sock: &Path, dev: bool, user: &[(String, String)]) -> String {
+pub fn fpm_conf(sock: &Path, dev: bool, user: &[(String, String)], timeout: Option<u64>) -> String {
     let mut s = String::new();
     s += "[global]\nerror_log = /proc/self/fd/2\ndaemonize = no\n\n[www]\n";
     if os::is_root() {
@@ -111,6 +141,13 @@ pub fn fpm_conf(sock: &Path, dev: bool, user: &[(String, String)]) -> String {
         "pm = ondemand\npm.max_children = {}\npm.process_idle_timeout = 10s\n",
         workers()
     );
+    // Pekerja diganti setelah 500 permintaan, supaya kebocoran memori tidak menumpuk.
+    s += "pm.max_requests = 500\n";
+    if let Some(t) = timeout {
+        // Caddy menjawab 504 tepat di batasnya; dua detik kemudian pekerja yang masih
+        // menggantung dihentikan, supaya bisa melayani permintaan lain.
+        s += &format!("request_terminate_timeout = {}s\n", t + 2);
+    }
     s += "catch_workers_output = yes\ndecorate_workers_output = no\nclear_env = no\n";
     s += &format!("ping.path = {PING_PATH}\n");
     for (k, v) in php_settings(dev, user) {
@@ -306,7 +343,21 @@ fn wp_cache_rule(o: &Opts) -> (String, String) {
     (matchers, route)
 }
 
-pub fn caddyfile(p: &Project, o: &Opts, port: u16, state: &Path, php: &Php) -> String {
+/// Batas yang sama di Caddy dan PHP: ukuran body dan lama satu permintaan.
+#[derive(Clone, Copy, Default)]
+pub struct Limits {
+    pub body: Option<u64>,
+    pub timeout: Option<u64>,
+}
+
+pub fn caddyfile(
+    p: &Project,
+    o: &Opts,
+    port: u16,
+    state: &Path,
+    php: &Php,
+    limits: Limits,
+) -> String {
     let mut s = String::from("{\n\tadmin off\n\tpersist_config off\n");
     s += &format!("\tstorage file_system {}\n", q(&state.join("caddy")));
     if o.domains.is_empty() {
@@ -352,7 +403,9 @@ pub fn caddyfile(p: &Project, o: &Opts, port: u16, state: &Path, php: &Php) -> S
         Some(_) => s += &format!("{} {{\n", o.domains.join(", ")),
     }
     s += &format!("\troot * {}\n", q(&p.root));
-    s += "\trequest_body {\n\t\tmax_size 128MB\n\t}\n";
+    if let Some(bytes) = limits.body {
+        s += &format!("\trequest_body {{\n\t\tmax_size {bytes}\n\t}}\n");
+    }
     // Log akses, satu baris JSON per permintaan. jamu meringkasnya menjadi satu baris pendek.
     s += "\tlog {\n\t\toutput stderr\n\t\tformat json\n\t}\n";
     // Urutan penanganan ditulis terang-terangan di dalam `route`, tidak diserahkan ke urutan
@@ -412,6 +465,11 @@ pub fn caddyfile(p: &Project, o: &Opts, port: u16, state: &Path, php: &Php) -> S
     // flush_interval -1: keluaran PHP diteruskan saat itu juga, tidak ditampung dulu.
     // Tanpa ini respons yang dialirkan (SSE, unduhan yang dibangkitkan) baru tiba setelah selesai.
     let mut opts = String::from("\t\t\tflush_interval -1\n");
+    if let Some(t) = limits.timeout {
+        // Dihitung sejak permintaan diteruskan ke PHP. Jawabannya 504, bukan 502, supaya
+        // terbedakan dari PHP yang mati.
+        opts += &format!("\t\t\tread_timeout {t}s\n");
+    }
     if let Php::Cgi { .. } = php {
         // php-cgi mengirim catatan galatnya lewat FastCGI, dan Caddy membuangnya kecuali
         // diminta. php-fpm menulisnya ke log sendiri, yang sudah diteruskan jamu.
@@ -463,13 +521,76 @@ mod tests {
     }
 
     #[test]
+    fn jumlah_pekerja_mengikuti_core_dan_memori() {
+        const MB: u64 = 1 << 20;
+        assert_eq!(workers_for(4, None), 8);
+        assert_eq!(workers_for(1, None), 4);
+        // Container kecil di mesin besar: memori yang menentukan.
+        assert_eq!(workers_for(32, Some(512 * MB)), 8);
+        assert_eq!(workers_for(32, Some(1024 * MB)), 16);
+        assert_eq!(workers_for(4, Some(256 * MB)), 4);
+        // Tidak pernah di bawah 4, dan memori lapang tidak menambah di atas batas core.
+        assert_eq!(workers_for(4, Some(128 * MB)), 4);
+        assert_eq!(workers_for(4, Some(64 * 1024 * MB)), 8);
+    }
+
+    #[test]
+    fn batas_body_mengikuti_post_max_size() {
+        assert_eq!(php_bytes("128M"), Some(128 << 20));
+        assert_eq!(php_bytes("1g"), Some(1 << 30));
+        assert_eq!(php_bytes("64K"), Some(64 << 10));
+        assert_eq!(php_bytes("2048"), Some(2048));
+        assert_eq!(php_bytes("banyak"), None);
+        assert_eq!(php_bytes(""), None);
+
+        let ini = |v: &str| vec![("post_max_size".to_string(), v.to_string())];
+        assert_eq!(body_limit(false, &[]), Some(128 << 20));
+        assert_eq!(body_limit(false, &ini("300M")), Some(300 << 20));
+        // PHP tanpa batas, atau nilai yang tidak terbaca: Caddy tidak menambah batas sendiri.
+        assert_eq!(body_limit(false, &ini("0")), None);
+        assert_eq!(body_limit(false, &ini("banyak")), None);
+
+        let dir = project(&["index.php"]);
+        let o = Opts {
+            dir: dir.clone(),
+            ..Default::default()
+        };
+        let text = |limits| caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), &fpm(), limits);
+        let with = text(Limits {
+            body: Some(300 << 20),
+            timeout: Some(300),
+        });
+        assert!(with.contains("max_size 314572800\n"));
+        assert!(with.contains("read_timeout 300s\n"));
+        let without = text(Limits::default());
+        assert!(!without.contains("request_body"));
+        assert!(!without.contains("read_timeout"));
+    }
+
+    #[test]
+    fn php_fpm_menghentikan_permintaan_yang_melewati_batas_waktu() {
+        let conf = fpm_conf(Path::new("/s/php-fpm.sock"), false, &[], Some(300));
+        assert!(conf.contains("request_terminate_timeout = 302s\n"));
+        assert!(conf.contains("pm.max_requests = 500\n"));
+        let conf = fpm_conf(Path::new("/s/php-fpm.sock"), false, &[], None);
+        assert!(!conf.contains("request_terminate_timeout"));
+    }
+
+    #[test]
     fn caddyfile_dev_hanya_di_loopback_dan_menolak_dotfile() {
         let dir = project(&["wp-load.php", "index.php"]);
         let o = Opts {
             dir: dir.clone(),
             ..Default::default()
         };
-        let text = caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), &fpm());
+        let text = caddyfile(
+            &detect(&dir),
+            &o,
+            8080,
+            Path::new("/s"),
+            &fpm(),
+            Limits::default(),
+        );
         assert!(text.contains("bind 127.0.0.1"));
         assert!(text.contains("auto_https off"));
         assert!(text.contains("respond @hidden 404"));
@@ -479,7 +600,16 @@ mod tests {
     #[test]
     fn caddyfile_wordpress_menyajikan_berkas_cache_plugin_sebelum_php() {
         let dir = project(&["wp-load.php", "index.php"]);
-        let text = |o: Opts| caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), &fpm());
+        let text = |o: Opts| {
+            caddyfile(
+                &detect(&dir),
+                &o,
+                8080,
+                Path::new("/s"),
+                &fpm(),
+                Limits::default(),
+            )
+        };
         let opts = || Opts {
             dir: dir.clone(),
             ..Default::default()
@@ -515,7 +645,14 @@ mod tests {
 
         // Bukan WordPress: tidak ada aturan cache.
         let plain = project(&["index.php"]);
-        let other = caddyfile(&detect(&plain), &opts(), 8080, Path::new("/s"), &fpm());
+        let other = caddyfile(
+            &detect(&plain),
+            &opts(),
+            8080,
+            Path::new("/s"),
+            &fpm(),
+            Limits::default(),
+        );
         assert!(!other.contains("wpsc"));
     }
 
@@ -526,7 +663,14 @@ mod tests {
             dir: dir.clone(),
             ..Default::default()
         };
-        let single = caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), &fpm());
+        let single = caddyfile(
+            &detect(&dir),
+            &o,
+            8080,
+            Path::new("/s"),
+            &fpm(),
+            Limits::default(),
+        );
         assert!(!single.contains("@ms_"));
 
         std::fs::write(
@@ -534,7 +678,14 @@ mod tests {
             "<?php\ndefine('MULTISITE', true);\n",
         )
         .unwrap();
-        let text = caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), &fpm());
+        let text = caddyfile(
+            &detect(&dir),
+            &o,
+            8080,
+            Path::new("/s"),
+            &fpm(),
+            Limits::default(),
+        );
         let at = |needle: &str| text.find(needle).expect(needle);
         assert!(at("route {") < at("rewrite @ms_files {re.ms_files.1}"));
         assert!(at("rewrite @ms_php {re.ms_php.1}") < at("respond @hidden 404"));
@@ -548,7 +699,14 @@ mod tests {
             dir: dir.clone(),
             ..Default::default()
         };
-        let text = caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), &fpm());
+        let text = caddyfile(
+            &detect(&dir),
+            &o,
+            8080,
+            Path::new("/s"),
+            &fpm(),
+            Limits::default(),
+        );
         assert!(text.contains("output stderr"));
         assert!(text.contains("log_skip @ping"));
     }
@@ -561,7 +719,14 @@ mod tests {
             domains: vec!["situs.test".into()],
             ..Default::default()
         };
-        let text = caddyfile(&detect(&dir), &o, 443, Path::new("/s"), &fpm());
+        let text = caddyfile(
+            &detect(&dir),
+            &o,
+            443,
+            Path::new("/s"),
+            &fpm(),
+            Limits::default(),
+        );
         assert!(text.contains("situs.test {"));
         assert!(!text.contains("auto_https off"));
         assert!(!text.contains("@uploads_php"));
@@ -575,7 +740,14 @@ mod tests {
             domains: vec!["situs.test".into(), "www.situs.test".into()],
             ..Default::default()
         };
-        let text = caddyfile(&detect(&dir), &o, 443, Path::new("/s"), &fpm());
+        let text = caddyfile(
+            &detect(&dir),
+            &o,
+            443,
+            Path::new("/s"),
+            &fpm(),
+            Limits::default(),
+        );
         assert!(text.contains("\nsitus.test, www.situs.test {\n"));
 
         // Di luar mode domain tidak ada yang perlu dicatat soal sertifikat.
@@ -583,7 +755,14 @@ mod tests {
             dir: dir.clone(),
             ..Default::default()
         };
-        let text = caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), &fpm());
+        let text = caddyfile(
+            &detect(&dir),
+            &o,
+            8080,
+            Path::new("/s"),
+            &fpm(),
+            Limits::default(),
+        );
         assert!(!text.contains("sertifikat"));
     }
 
@@ -595,7 +774,14 @@ mod tests {
             behind_proxy: true,
             ..Default::default()
         };
-        let text = caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), &fpm());
+        let text = caddyfile(
+            &detect(&dir),
+            &o,
+            8080,
+            Path::new("/s"),
+            &fpm(),
+            Limits::default(),
+        );
         assert!(!text.contains("bind 127.0.0.1"));
         assert!(text.contains("auto_https off"));
         assert!(text.contains("trusted_proxies static private_ranges"));
@@ -610,12 +796,26 @@ mod tests {
             dir: dir.clone(),
             ..Default::default()
         };
-        let text = caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), &fpm());
+        let text = caddyfile(
+            &detect(&dir),
+            &o,
+            8080,
+            Path::new("/s"),
+            &fpm(),
+            Limits::default(),
+        );
         assert!(text.contains("rewrite @other_php /index.php"));
         assert!(text.contains("try_files {path} index.php"));
 
         let dir = project(&["index.php"]);
-        let text = caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), &fpm());
+        let text = caddyfile(
+            &detect(&dir),
+            &o,
+            8080,
+            Path::new("/s"),
+            &fpm(),
+            Limits::default(),
+        );
         assert!(!text.contains("@other_php"));
         assert!(!text.contains("try_files"));
     }
@@ -627,7 +827,14 @@ mod tests {
             dir: dir.clone(),
             ..Default::default()
         };
-        let text = caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), &fpm());
+        let text = caddyfile(
+            &detect(&dir),
+            &o,
+            8080,
+            Path::new("/s"),
+            &fpm(),
+            Limits::default(),
+        );
         assert!(text.contains("path *.js *.mjs\n"));
         let at = |needle: &str| text.find(needle).expect(needle);
         // Urutan di dalam route: tolak, PHP, jenis isi, berkas statis.
@@ -649,7 +856,14 @@ mod tests {
             ini: "/s/php.ini".into(),
             port: 50123,
         };
-        let text = caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), &php);
+        let text = caddyfile(
+            &detect(&dir),
+            &o,
+            8080,
+            Path::new("/s"),
+            &php,
+            Limits::default(),
+        );
         assert!(text.contains("php_fastcgi 127.0.0.1:50123 {"));
         assert!(!text.contains("@ping"));
         assert!(!text.contains("unix/"));

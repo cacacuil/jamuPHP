@@ -10,7 +10,7 @@ use std::process::Command;
 use std::{env, fs};
 
 use crate::cli::{check_version, php_cli, php_version};
-use crate::config::{Php, caddyfile};
+use crate::config::{Limits, Php, body_limit, caddyfile};
 use crate::detect::{Kind, kind_name};
 use crate::mail;
 use crate::paths::{find_bin, find_file, open_state};
@@ -163,7 +163,14 @@ pub fn check(o: Opts) -> Result<(), String> {
                 Ok(()) => r.ok(&format!("PHP {version}")),
                 Err(e) => r.problem(&e),
             }
-            Some(write_php(&dir, &state, found, dev, &ini)?)
+            Some(write_php(
+                &dir,
+                &state,
+                found,
+                dev,
+                &ini,
+                settings.timeout(),
+            )?)
         }
         Err(e) => {
             r.problem(&e);
@@ -186,7 +193,11 @@ pub fn check(o: Opts) -> Result<(), String> {
             let port = o
                 .port
                 .unwrap_or(if o.domains.is_empty() { 8080 } else { 443 });
-            write(&file, caddyfile(&project, &o, port, &state, php))?;
+            let limits = Limits {
+                body: body_limit(dev, &ini),
+                timeout: settings.timeout(),
+            };
+            write(&file, caddyfile(&project, &o, port, &state, php, limits))?;
             let out = Command::new(&caddy)
                 .args(["validate", "--adapter", "caddyfile", "--config"])
                 .arg(&file)

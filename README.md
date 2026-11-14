@@ -65,6 +65,7 @@ Taruh `jamu.toml` di folder project hanya bila ada yang perlu ditimpa:
 php  = "8.4"            # tolak jalan dengan versi PHP lain
 root = "public"         # document root
 scheduler = true        # penjadwal; bawaan: menyala kecuali di mode dev
+timeout = 300           # batas waktu satu permintaan PHP, detik; 0 = tanpa batas
 
 [ini]
 memory_limit = "512M"
@@ -77,6 +78,19 @@ run  = "php artisan queue:work --tries=3"
 Pekerja dinyalakan bersama situs, diawasi, dan dinyalakan ulang bila mati. Penjadwal
 menggantikan baris cron: tiap menit ia menjalankan `schedule:run` untuk Laravel dan
 `wp-cron.php` untuk WordPress. Kunci yang tidak dikenal ditolak.
+
+Batas yang dijaga `jamu` supaya satu situs tidak menjatuhkan dirinya sendiri:
+
+- **Waktu.** Permintaan PHP yang belum selesai setelah `timeout` detik (bawaan 300) dijawab
+  504 dan pekerjanya dihentikan, supaya permintaan yang menggantung tidak menghabiskan
+  semua pekerja. Jawaban yang dialirkan (SSE, unduhan buatan PHP) ikut terpotong di batas
+  yang sama; naikkan `timeout` atau isi 0 bila situs membutuhkannya. Di Windows jawabannya
+  504 tetapi pekerjanya tidak dihentikan.
+- **Ukuran unggahan.** Mengikuti `post_max_size` (bawaan 128M). Mengubahnya di `[ini]`
+  sudah cukup; yang lebih besar ditolak 413 sebelum sampai ke PHP.
+- **Jumlah pekerja PHP.** Dua kali jumlah core, tetapi tidak lebih dari yang muat di batas
+  memori container (64 MB per pekerja), dan tidak kurang dari 4. Angkanya tertulis di
+  baris pertama log saat `jamu` menyala.
 
 ## WordPress
 

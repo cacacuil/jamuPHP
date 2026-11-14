@@ -130,6 +130,36 @@ fn caddy_log(name: &str, line: &str) -> Option<String> {
     plain_log(name, line)
 }
 
+/// Tiga kabar php-fpm yang menjelaskan kenapa situs lambat atau permintaan gagal, ditulis
+/// ulang supaya bisa dibaca tanpa mengenal php-fpm. Sisanya diteruskan apa adanya.
+fn fpm_log(name: &str, line: &str) -> Option<String> {
+    if line.contains("execution timed out")
+        && let Some(request) = line.split("(request: \"").nth(1)
+        && let Some(request) = request.split('"').next()
+    {
+        return Some(format!(
+            "jamu: permintaan {request} dihentikan: melewati batas waktu (timeout di jamu.toml)"
+        ));
+    }
+    if line.contains("reached max_children setting") || line.contains("reached pm.max_children") {
+        return Some(
+            "jamu: semua pekerja PHP sedang sibuk; permintaan berikutnya menunggu giliran".into(),
+        );
+    }
+    if line.contains("exited on signal 9 (SIGKILL)") {
+        return Some(format!(
+            "[{name}] {line}\njamu: pekerja PHP dimatikan paksa oleh sistem; biasanya karena memori container habis"
+        ));
+    }
+    // Pekerja yang selesai gilirannya lalu diganti adalah kejadian rutin, bukan berita.
+    if line.contains("NOTICE: [pool")
+        && (line.ends_with(" started") || line.contains("exited with code 0 after"))
+    {
+        return None;
+    }
+    plain_log(name, line)
+}
+
 fn spawn(name: &str, mut cmd: Command, log: LogLine) -> std::io::Result<Child> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -268,6 +298,7 @@ pub fn supervise(plan: &Plan, stop: &AtomicBool, ready: impl FnOnce()) -> Result
             false,
         ));
     }
+    services[0].log = fpm_log;
     services[1].log = caddy_log;
     let mut ready = Some(ready);
     // Tugas terjadwal yang sedang berjalan. Seperti cron: dijalankan tiap pergantian menit.
@@ -395,6 +426,36 @@ pub fn supervise(plan: &Plan, stop: &AtomicBool, ready: impl FnOnce()) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kabar_php_fpm_ditulis_ulang() {
+        let timeout = r#"[14-Nov-2026 15:44:33] WARNING: [pool www] child 812, script '/app/impor.php' (request: "POST /impor.php?x=1") execution timed out (302.117 sec), terminating"#;
+        assert_eq!(
+            fpm_log("php-fpm", timeout).as_deref(),
+            Some(
+                "jamu: permintaan POST /impor.php?x=1 dihentikan: melewati batas waktu (timeout di jamu.toml)"
+            )
+        );
+        let busy = "[14-Nov-2026 15:52:59] WARNING: [pool www] server reached max_children setting (8), consider raising it";
+        assert!(fpm_log("php-fpm", busy).unwrap().contains("sedang sibuk"));
+        let killed = "[14-Nov-2026 15:52:59] WARNING: [pool www] child 9 exited on signal 9 (SIGKILL) after 4.2 seconds from start";
+        let text = fpm_log("php-fpm", killed).unwrap();
+        assert!(text.starts_with("[php-fpm] [14-Nov-2026") && text.contains("memori container"));
+        for routine in [
+            "[14-Nov-2026 16:01:03] NOTICE: [pool www] child 2668 exited with code 0 after 0.634504 seconds from start",
+            "[14-Nov-2026 16:01:03] NOTICE: [pool www] child 2672 started",
+        ] {
+            assert_eq!(fpm_log("php-fpm", routine), None);
+        }
+        // Pekerja yang keluar dengan galat tetap diberitakan.
+        let crash = "[14-Nov-2026 16:01:03] WARNING: [pool www] child 7 exited with code 255 after 1.2 seconds from start";
+        assert!(fpm_log("php-fpm", crash).is_some());
+        let other = "[14-Nov-2026 15:44:33] NOTICE: ready to handle connections";
+        assert_eq!(
+            fpm_log("php-fpm", other),
+            Some(format!("[php-fpm] {other}"))
+        );
+    }
 
     #[test]
     fn log_akses_diringkas_dan_baris_lain_dibiarkan() {

@@ -364,11 +364,16 @@ grup_toml() {
   cat > "$site/pekerja.php" <<'EOF'
 <?php while (true) { file_put_contents(__DIR__ . '/pekerja.log', getmypid() . ' ' . ini_get('date.timezone') . "\n", FILE_APPEND); usleep(200000); }
 EOF
+  printf '%s\n' '<?php sleep(8); echo "bangun";' > "$site/umum/tidur.php"
+  printf '%s\n' '<?php echo "terima=", strlen(file_get_contents("php://input"));' > "$site/umum/terima.php"
+  head -c 5000 /dev/zero > "$work/lima-kb.bin"
   cat > "$site/jamu.toml" <<'EOF'
 root = "umum"
+timeout = 2
 
 [ini]
 memory_limit = "300M"
+post_max_size = "1K"
 "date.timezone" = "Asia/Jakarta"
 
 [[worker]]
@@ -398,6 +403,22 @@ EOF
   cek "root dari jamu.toml disajikan" "$(has "$r" 'limit=')" yes "$r"
   cek "[ini] memory_limit dipakai web" "$(has "$r" 'limit=300M')" yes "$r"
   cek "[ini] date.timezone dipakai web" "$(has "$r" 'tz=Asia/Jakarta')" yes "$r"
+  # batas ukuran body mengikuti post_max_size yang berlaku: ditolak sebelum sampai ke PHP
+  cek "[ini] post_max_size 1K: body 5 KB ditolak 413" "$(kode --data-binary "@$work/lima-kb.bin" "$B/terima.php")" 413
+  cek "[ini] post_max_size 1K: body kecil diterima" "$(cu --data-binary 'a=1' "$B/terima.php")" "terima=3"
+  # batas waktu satu permintaan: yang menggantung dijawab 504 dan pekerjanya dikembalikan
+  r=$(cu -o "$work/tidur.out" -w '%{http_code} %{time_total}' "$B/tidur.php")
+  cek "timeout 2 detik: permintaan 8 detik tidak selesai" "$(has "$(cat "$work/tidur.out")" bangun)" no
+  cek "timeout 2 detik: dijawab 504" "${r% *}" 504
+  cek "timeout 2 detik: diputus sebelum 5 detik" "$(awk -v a="${r#* }" 'BEGIN{print (a<5)?"yes":"no"}')" yes "$r"
+  if [ "$PHP_PROC" = php-fpm ]; then
+    baru=no
+    for _ in $(seq 1 12); do grep -q 'jamu: permintaan GET /tidur.php dihentikan' "$log" && { baru=yes; break; }; sleep 0.5; done
+    cek "timeout: pekerja dihentikan dan log menyebut permintaannya" "$baru" yes "$(grep -i 'tidur\|timed' "$log" | head -3)"
+  else
+    echo "lewati  timeout: menghentikan pekerja hanya di jalur php-fpm"
+  fi
+  cek "timeout: situs tetap melayani" "$(has "$(cu "$B/")" 'limit=300M')" yes
   # pekerja berjalan, memakai PHP dan pengaturan yang sama
   for _ in $(seq 1 20); do [ -s "$site/pekerja.log" ] && break; sleep 0.5; done
   cek "pekerja berjalan" "$([ -s "$site/pekerja.log" ] && echo yes || echo no)" yes

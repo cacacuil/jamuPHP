@@ -11,7 +11,8 @@ use std::{env, fs, thread};
 
 use crate::cli::{check_version, php_cli, php_version};
 use crate::config::{
-    PING_PATH, Php, Plan, Task, caddyfile, cgi_ini, cgi_workers, fpm_conf, workers,
+    Limits, PING_PATH, Php, Plan, Task, body_limit, caddyfile, cgi_ini, cgi_workers, fpm_conf,
+    workers,
 };
 use crate::detect::{Kind, Project, kind_name};
 use crate::mail;
@@ -101,6 +102,7 @@ pub fn write_php(
     (cgi, bin): (bool, PathBuf),
     dev: bool,
     user: &[(String, String)],
+    timeout: Option<u64>,
 ) -> Result<Php, String> {
     if cgi {
         let ini = dir.join("php.ini");
@@ -120,7 +122,7 @@ pub fn write_php(
         ));
     }
     let conf = dir.join("php-fpm.conf");
-    write(&conf, fpm_conf(&sock, dev, user))?;
+    write(&conf, fpm_conf(&sock, dev, user, timeout))?;
     Ok(Php::Fpm { bin, conf, sock })
 }
 
@@ -170,14 +172,24 @@ pub fn serve(o: Opts) -> Result<(), String> {
     let state = open_state(&project.dir)?;
     let mut ini = settings.ini();
     mail::add_sendmail(&mut ini, &state)?;
-    let php = write_php(&state, &state, found_php, dev, &ini)?;
+    let limits = Limits {
+        body: body_limit(dev, &ini),
+        timeout: settings.timeout(),
+    };
+    let php = write_php(&state, &state, found_php, dev, &ini, limits.timeout)?;
     if let Php::Fpm { sock, .. } = &php {
         let _ = fs::remove_file(sock);
     }
     let (php_bin, how) = match &php {
         Php::Fpm { bin, .. } => (
             bin,
-            format!("php-fpm ondemand, maksimal {} pekerja", workers()),
+            format!(
+                "php-fpm ondemand, maksimal {} pekerja{}",
+                workers(),
+                os::memory_limit()
+                    .map(|m| format!(" (batas memori {} MB)", m >> 20))
+                    .unwrap_or_default()
+            ),
         ),
         Php::Cgi { bin, .. } => (bin, format!("php-cgi, {} pekerja", cgi_workers())),
     };
@@ -245,7 +257,7 @@ pub fn serve(o: Opts) -> Result<(), String> {
     };
     write(
         &plan.caddyfile,
-        caddyfile(&project, &o, port, &state, &plan.php),
+        caddyfile(&project, &o, port, &state, &plan.php, limits),
     )?;
 
     let rel_root = project

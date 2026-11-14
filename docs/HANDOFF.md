@@ -1,6 +1,6 @@
 # JamuPHP: handoff v2
 
-Tanggal: 14 November 2026, revisi 12. Menggantikan handoff v1 ("XAMPP berbasis Rust").
+Tanggal: 14 November 2026, revisi 13. Menggantikan handoff v1 ("XAMPP berbasis Rust").
 Nama produk: JamuPHP. Perintahnya `jamu`, file config-nya `jamu.toml`. Repositori:
 https://github.com/cacacuil/jamuphp (lisensi AGPL-3.0).
 
@@ -37,6 +37,10 @@ Perubahan di revisi 12: fase 1 digabung ke `main` atas permintaan owner. Fase 2 
 di branch `fase-2` (bagian 21): aturan berkas cache, multisite, wp-cron, log akses,
 `jamu check`, beberapa domain dan kabar sertifikat, serta mode teruskan email. Sebab runner
 Windows di CI sesekali hilang ditemukan dan dicatat di bagian yang sama.
+Perubahan di revisi 13: owner menetapkan sasaran berikutnya adalah performa dan kestabilan;
+pengerasan keamanan ditunda. Dikerjakan di branch `stabil-performa` (bagian 22): batas waktu
+permintaan, jumlah pekerja mengikuti memori container, batas unggahan satu sumber, dan
+kabar php-fpm yang terbaca. Penyetelan opcache dan JIT diukur dan ditolak.
 
 ## 1. Inti dalam satu menit
 
@@ -1679,6 +1683,88 @@ Yang hanya diuji dari kode sumber dan tes unit, belum terhadap layanan sungguhan
 - Uji `--domain` dengan domain sungguhan terhadap staging Let's Encrypt, uji relay SMTP
   sungguhan, dan deploy di Dokploy dari image GHCR: perlu dilakukan owner.
 - Syarat lulus fase ini (sejumlah situs berjalan 30 hari) baru bisa dimulai setelah itu.
+
+## 22. Kestabilan dan performa (belum di `main`)
+
+Dikerjakan di branch `stabil-performa`. Sasaran dari owner: performa dan kestabilan.
+Pengerasan keamanan ditunda. Aturannya tetap: ukur dulu, ubah hanya yang terukur.
+
+### Yang diukur
+
+Sandbox 4 core, PHP 8.3.6 dari paket distro, Caddy 2.11.9, `wrk`. Angka req/dtk hanya
+untuk dibandingkan satu sama lain, bukan dengan bagian 19.
+
+| Yang diuji | Hasil |
+|---|---|
+| Halaman PHP yang tidur 45 detik (`max_execution_time` 30) | Dijawab 200 setelah 45 detik. Waktu menunggu tidak dihitung PHP: tidak ada batas (jalur negatif D3) |
+| Koneksi yang tidak menyelesaikan header | Ditutup Caddy setelah 60 detik |
+| 10 POST yang menjanjikan body lalu diam | Tidak satu pun pekerja PHP menyala dan situs tetap menjawab. Koneksinya masih terbuka saat ditutup di detik ke-43 |
+| Memori pekerja Laravel di bawah beban, 8 pekerja | PSS total 53 MB; RSS puncak satu pekerja 31-47 MB |
+| opcache, Laravel halaman sambutan | 553 skrip, 1.058 dari 16.229 kunci, 23,5 dari 128 MB, string 5,0 dari 8,0 MB |
+| `opcache.interned_strings_buffer` 4, 8, 32 MB | 537, 533, 514 req/dtk: tidak ada selisih |
+| JIT (`tracing`, 64 MB), dua putaran | 597 dan 578 lawan 543 dan 576 req/dtk tanpa JIT: di dalam derau |
+| `pm.max_requests = 500` pada halaman paling ringan, dua putaran tiga jalan | 5.293-5.947 req/dtk dengan, 5.523-6.216 tanpa; tidak ada permintaan gagal dari 59.879 |
+| opcache di image `php:8.4-fpm` | Aktif; kini diperiksa uji image di CI |
+
+### Yang dibuat
+
+1. **Batas waktu satu permintaan** (D3). Kunci baru `timeout` di `jamu.toml`, bawaan 300
+   detik, 0 berarti tanpa batas. Tepat di batasnya Caddy menjawab 504 (`read_timeout`);
+   dua detik kemudian php-fpm menghentikan pekerjanya (`request_terminate_timeout`) dan
+   log menyebut permintaannya. Tanpa ini delapan permintaan yang menggantung ke API atau
+   database yang mati membekukan seluruh situs tanpa batas waktu.
+2. **Jumlah pekerja mengikuti memori container** (F3). Sebelumnya dua kali jumlah core,
+   minimal 4, apa pun memorinya: di node 32 core tanpa kuota CPU itu 64 pekerja per situs.
+   Sekarang juga dibatasi memori cgroup dibagi 64 MB. Container 512 MB mendapat 8 pekerja,
+   256 MB mendapat 4. Tanpa batas memori, perilakunya tidak berubah.
+3. **Batas unggahan satu sumber.** Caddy dulu dipatok 128 MB, sehingga `post_max_size`
+   yang dinaikkan di `[ini]` tetap berakhir 413. Sekarang batas Caddy dibaca dari
+   `post_max_size` yang berlaku.
+4. **Pekerja php-fpm diganti tiap 500 permintaan**, sama seperti jalur `php-cgi`, supaya
+   kebocoran memori plugin tidak menumpuk di situs yang tidak pernah sepi.
+5. **Tiga kabar php-fpm ditulis ulang**: permintaan yang dihentikan karena batas waktu,
+   semua pekerja sibuk, dan pekerja yang dimatikan sistem (biasanya memori container
+   habis). Baris rutin pergantian pekerja dibuang dari log.
+
+### Yang ditolak
+
+- **Penyetelan opcache dan JIT.** Tidak ada selisih yang terukur; bawaan PHP dibiarkan.
+- **Batas waktu body dan batas jumlah koneksi di Caddy** (H5, H6). Body yang lambat
+  terbukti tidak menyandera pekerja PHP. Batas waktu body akan memutus unggahan besar
+  dari sambungan lambat, dan Caddy bawaan tidak punya batas jumlah koneksi. Di belakang
+  proxy, batas milik proxy yang berlaku.
+
+### Hal yang perlu diketahui
+
+- **Batas waktu dihitung sejak permintaan diteruskan ke PHP sampai jawabannya selesai.**
+  Jawaban yang dialirkan ikut terpotong: aliran 6 detik dengan `timeout = 2` berhenti di
+  detik ke-2 dengan kode 200 yang sudah terkirim. Situs dengan SSE atau unduhan panjang
+  buatan PHP perlu menaikkan `timeout`.
+- **Di jalur `php-cgi` (Windows) jawabannya 504 tetapi pekerjanya tidak dihentikan.**
+  `php-cgi` tidak punya padanan `request_terminate_timeout`.
+- **Angka 64 MB per pekerja adalah taksiran dari pengukuran situs kecil.** Situs dengan
+  plugin berat bisa melewatinya; saat itu terjadi kernel mematikan satu pekerja dan
+  log menyebut penyebabnya.
+- **WordPress tidak diukur ulang di sini** karena situs uji lokal belum terpasang. Angka
+  WordPress tetap dari bagian 19.
+
+### Hasil uji
+
+`tests/e2e.sh`: 278 pemeriksaan di jalur php-fpm dan 275 di jalur `php-cgi`, semuanya
+lulus di sandbox. 39 tes unit. Uji image menambah dua pemeriksaan: opcache aktif, dan
+jumlah pekerja mengikuti `--memory`.
+
+### Yang belum
+
+- **"jamu: siap" diumumkan walau php-fpm gagal menyala.** Terlihat saat pengukuran: siap
+  diumumkan begitu port menerima koneksi. `jamu health` tetap gagal, jadi container tidak
+  dirutekan, tetapi baris log itu menyesatkan.
+- **Metrik.** Jumlah pekerja aktif dan panjang antrean belum bisa dilihat dari luar; yang
+  ada hanya baris log "semua pekerja PHP sedang sibuk".
+- **Uji beban lama.** Semua pengukuran di sini 8-15 detik. Kebocoran dan penumpukan baru
+  terlihat dalam jam atau hari.
+- **Tag image yang tetap per rilis.** Sekarang hanya `:8.4` yang terus ditimpa, jadi tidak
+  ada versi untuk kembali bila rilis baru bermasalah.
 
 ## Sumber
 
