@@ -165,8 +165,12 @@ memori() {
 }
 
 # Satu putaran wrk. Mencetak: req/s, p50 ms, p99 ms, jumlah galat, jumlah permintaan.
+# KONEKSI berakhiran z: permintaan membawa Accept-Encoding seperti browser, jadi jawabannya
+# dimampatkan. wrk sendiri tidak pernah memintanya.
 wrk_sekali() { # KONEKSI URL [DETIK]
-  wrk -t4 -c"$1" -d"${3:-$LAMA}s" --latency "$2" 2>&1 | awk '
+  local kepala=()
+  case "$1" in *z) kepala=(-H 'Accept-Encoding: gzip, zstd') ;; esac
+  wrk -t4 -c"${1%z}" -d"${3:-$LAMA}s" --latency "${kepala[@]}" "$2" 2>&1 | awk '
     function ms(v) {
       if (v ~ /us$/) return v / 1000
       if (v ~ /ms$/) return v + 0
@@ -195,7 +199,7 @@ ukur() { # SERVER APP
   echo "$server $app $siap $diam" >> "$W/mulai.txt"
   while read -r path _; do
     wrk -t4 -c8 -d3s "$U$path" > /dev/null 2>&1 || true # pemanasan
-    for c in 8 64; do
+    for c in 8 64 64z; do
       : > "$W/putaran.txt"
       mem=-
       for i in $(seq "$ULANG"); do
@@ -247,6 +251,8 @@ ringkas() {
     echo '```'
     cat "$W/info.txt"
     echo '```'
+    echo
+    echo 'Koneksi `64z`: 64 koneksi yang meminta jawaban dimampatkan, seperti browser.'
     echo
     echo '| beban | koneksi | server | req/s | p50 ms | p99 ms | galat | memori MB |'
     echo '|---|---|---|---|---|---|---|---|'
