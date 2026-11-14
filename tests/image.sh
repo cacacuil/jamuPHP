@@ -13,7 +13,8 @@ mkdir "$site/public"
 echo 'RAHASIA=1' > "$site/.env"
 echo 'RAHASIA=1' > "$site/public/.env"
 cat > "$site/public/index.php" <<'PHP'
-<?php echo 'https=', $_SERVER['HTTPS'] ?? 'tidak', ' uid=', posix_geteuid(), ' ext=', implode(',', array_map('strtolower', get_loaded_extensions()));
+<?php $oc = function_exists('opcache_get_status') ? opcache_get_status(false) : null;
+echo 'https=', $_SERVER['HTTPS'] ?? 'tidak', ' uid=', posix_geteuid(), ' opcache=', $oc && $oc['opcache_enabled'] ? 'on' : 'off', ' ext=', implode(',', array_map('strtolower', get_loaded_extensions()));
 PHP
 chmod -R a+rX "$site"
 
@@ -47,6 +48,8 @@ surat=$(docker run --rm -w /tmp --entrypoint jamu \
 body=$(get "$url/")
 [[ $body == https=tidak* ]] || fail "halaman utama: $body"
 [[ $body == *" uid=0 "* ]] && fail "PHP berjalan sebagai root"
+# Tanpa opcache setiap permintaan mengompilasi ulang semua berkas PHP.
+[[ $body == *" opcache=on "* ]] || fail "opcache tidak aktif di php-fpm: ${body%% ext=*}"
 for ext in $extensions; do
   [[ ",${body##*ext=}," == *",$ext,"* ]] || fail "extension $ext tidak ada"
 done
