@@ -1,0 +1,338 @@
+//! Isi konfigurasi yang dibangkitkan: Caddyfile, php-fpm.conf, dan php.ini untuk php-cgi.
+
+use std::path::{Path, PathBuf};
+use std::thread;
+
+use crate::Opts;
+use crate::detect::{Kind, Project};
+use crate::os;
+
+/// Cara PHP dijalankan.
+pub enum Php {
+    /// Linux: php-fpm lewat soket Unix. Pekerja dibuat saat ada permintaan.
+    Fpm {
+        bin: PathBuf,
+        conf: PathBuf,
+        sock: PathBuf,
+    },
+    /// Windows, yang tidak punya php-fpm: php-cgi sebagai server FastCGI di port loopback.
+    /// Dengan PHP_FCGI_CHILDREN ia sendiri yang membuat pekerja, membagi satu soket ke
+    /// semuanya, dan mengganti pekerja yang keluar. Supervisor cukup mengawasi induknya.
+    Cgi {
+        bin: PathBuf,
+        ini: PathBuf,
+        port: u16,
+    },
+}
+
+pub struct Plan {
+    pub caddy: PathBuf,
+    pub caddyfile: PathBuf,
+    pub php: Php,
+}
+
+/// Dijawab php-fpm sendiri ("pong"), tanpa menjalankan kode situs. Caddy hanya meneruskannya
+/// untuk permintaan dari loopback, jadi `jamu health` menguji Caddy dan php-fpm sekaligus.
+pub const PING_PATH: &str = "/-/jamu/ping";
+
+/// Bawaan opcache memeriksa perubahan file paling cepat tiap 2 detik. Di mode dev itu terasa
+/// seperti "sudah disimpan tapi halamannya belum berubah", jadi diperiksa di setiap permintaan.
+const DEV_REVALIDATE: u8 = 0;
+
+pub fn workers() -> usize {
+    // Dua kali jumlah core, minimal 4 supaya permintaan WordPress ke dirinya sendiri tidak macet.
+    (thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        * 2)
+    .max(4)
+}
+
+/// Pekerja php-cgi selalu hidup semua (tidak ada ondemand) dan masing-masing memakai
+/// sekitar 27 MB, jadi jumlahnya mengikuti jumlah core dengan batas 4 sampai 8.
+pub fn cgi_workers() -> usize {
+    thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(4, 8)
+}
+
+pub fn fpm_conf(sock: &Path, dev: bool) -> String {
+    let mut s = String::new();
+    s += "[global]\nerror_log = /proc/self/fd/2\ndaemonize = no\n\n[www]\n";
+    if os::is_root() {
+        s += "user = root\ngroup = root\n";
+    }
+    s += &format!("listen = {}\nlisten.mode = 0600\n", sock.display());
+    s += &format!(
+        "pm = ondemand\npm.max_children = {}\npm.process_idle_timeout = 10s\n",
+        workers()
+    );
+    s += "catch_workers_output = yes\ndecorate_workers_output = no\nclear_env = no\n";
+    s += &format!("ping.path = {PING_PATH}\n");
+    s += "php_admin_value[memory_limit] = 256M\n";
+    s += "php_admin_value[upload_max_filesize] = 128M\n";
+    s += "php_admin_value[post_max_size] = 128M\n";
+    s += &format!(
+        "php_admin_flag[display_errors] = {}\n",
+        if dev { "on" } else { "off" }
+    );
+    if dev {
+        s += &format!("php_admin_value[opcache.revalidate_freq] = {DEV_REVALIDATE}\n");
+    }
+    s
+}
+
+/// Ekstensi dari zip resmi PHP untuk Windows yang dinyalakan bila filenya ada.
+/// Urutan penting: exif butuh mbstring dimuat lebih dulu.
+const WINDOWS_EXTENSIONS: &[&str] = &[
+    "bz2",
+    "curl",
+    "fileinfo",
+    "ftp",
+    "gd",
+    "gettext",
+    "gmp",
+    "intl",
+    "mbstring",
+    "exif",
+    "mysqli",
+    "openssl",
+    "pdo_mysql",
+    "pdo_pgsql",
+    "pdo_sqlite",
+    "pgsql",
+    "soap",
+    "sockets",
+    "sodium",
+    "sqlite3",
+    "xsl",
+    "zip",
+];
+
+/// Zip resmi PHP untuk Windows datang tanpa php.ini: tidak satu pun ekstensi aktif, dan
+/// tidak ada daftar CA, sehingga HTTPS dari PHP gagal. Keduanya diisi dari sini.
+fn windows_ini(php_dir: &Path) -> String {
+    let fwd = |p: PathBuf| p.display().to_string().replace('\\', "/");
+    let ext = php_dir.join("ext");
+    let has = |name: &str| ext.join(format!("php_{name}.dll")).is_file();
+    let mut s = format!("extension_dir = \"{}\"\n", fwd(ext.clone()));
+    for name in WINDOWS_EXTENSIONS.iter().filter(|n| has(n)) {
+        s += &format!("extension = {name}\n");
+    }
+    // Sejak PHP 8.5 opcache menyatu di dalam PHP dan tidak punya DLL.
+    if has("opcache") {
+        s += "zend_extension = opcache\n";
+    }
+    let ca = php_dir.join("extras/ssl/cacert.pem");
+    if ca.is_file() {
+        s += &format!("curl.cainfo = \"{0}\"\nopenssl.cafile = \"{0}\"\n", fwd(ca));
+    }
+    s
+}
+
+/// php-cgi tidak punya `php_admin_value` seperti php-fpm, jadi pengaturannya lewat php.ini
+/// yang dibangkitkan dan ditunjuk dengan `-c`.
+pub fn cgi_ini(bin: &Path, dev: bool) -> String {
+    let mut s =
+        String::from("memory_limit = 256M\nupload_max_filesize = 128M\npost_max_size = 128M\n");
+    s += &format!(
+        "display_errors = {}\nlog_errors = On\n",
+        if dev { "On" } else { "Off" }
+    );
+    if dev {
+        s += &format!("opcache.revalidate_freq = {DEV_REVALIDATE}\n");
+    }
+    if cfg!(windows) {
+        s += &windows_ini(bin.parent().unwrap_or(Path::new(".")));
+    }
+    s
+}
+
+/// Path dalam tanda kutip untuk Caddyfile. Di dalam kutip Caddy hanya mengenal `\"`;
+/// garis miring terbalik lain dibiarkan apa adanya. Path Windows ditulis dengan garis miring
+/// biasa, yang diterima Caddy maupun PHP.
+fn q(p: &Path) -> String {
+    let s = p.display().to_string();
+    let s = if cfg!(windows) {
+        s.replace('\\', "/")
+    } else {
+        s
+    };
+    format!("\"{}\"", s.replace('"', "\\\""))
+}
+
+pub fn caddyfile(p: &Project, o: &Opts, port: u16, state: &Path, php: &Php) -> String {
+    let mut s = String::from("{\n\tadmin off\n\tpersist_config off\n");
+    s += &format!("\tstorage file_system {}\n", q(&state.join("caddy")));
+    s += "\tlog {\n\t\tlevel WARN\n\t}\n";
+    if o.domain.is_none() {
+        // Tanpa TLS hanya HTTP/1.1 yang berlaku; menyebutnya terang-terangan membungkam
+        // peringatan Caddy soal HTTP/2 dan HTTP/3 di setiap start.
+        s += "\tservers {\n\t\tprotocols h1\n";
+        if o.behind_proxy {
+            // Alamat klien diambil dari X-Forwarded-For hanya bila pengirimnya proxy di jaringan privat.
+            s += "\t\ttrusted_proxies static private_ranges\n";
+        }
+        s += "\t}\n";
+    }
+    match &o.domain {
+        None => s += "\tauto_https off\n",
+        Some(_) => {
+            if let Some(e) = &o.email {
+                s += &format!("\temail {e}\n");
+            }
+            if let Some(ca) = &o.acme_ca {
+                s += &format!("\tacme_ca {ca}\n");
+            }
+            if let Some(root) = &o.acme_ca_root {
+                s += &format!("\tacme_ca_root {}\n", q(Path::new(root)));
+            }
+        }
+    }
+    s += "}\n\n";
+
+    match &o.domain {
+        // Dev hanya mendengarkan di loopback: situs lokal tidak boleh terbuka ke jaringan.
+        None if o.behind_proxy => s += &format!("http://:{port} {{\n"),
+        None => s += &format!("http://:{port} {{\n\tbind 127.0.0.1\n"),
+        Some(d) => s += &format!("{d} {{\n"),
+    }
+    s += &format!("\troot * {}\n", q(&p.root));
+    s += "\trequest_body {\n\t\tmax_size 128MB\n\t}\n";
+    // Dotfile (.env, .git, .htaccess) tidak pernah disajikan, kecuali .well-known.
+    s += "\t@hidden {\n\t\tpath_regexp (^|/)\\.\n\t\tnot path /.well-known/*\n\t}\n\trespond @hidden 404\n";
+    if p.kind == Kind::WordPress {
+        // Windows mengabaikan titik dan spasi di ujung nama file, jadi `x.php.` adalah `x.php`.
+        // Spasi ditulis \x20 karena spasi biasa memotong token di Caddyfile.
+        s += "\t@uploads_php path_regexp (?i)^/wp-content/uploads/.*\\.php[.\\x20]*(/|$)\n\trespond @uploads_php 403\n";
+    }
+    let upstream = match php {
+        Php::Fpm { sock, .. } => q(Path::new(&format!("unix/{}", sock.display()))),
+        Php::Cgi { port, .. } => format!("127.0.0.1:{port}"),
+    };
+    if let Php::Fpm { .. } = php {
+        s += &format!("\t@ping {{\n\t\tpath {PING_PATH}\n\t\tremote_ip 127.0.0.1 ::1\n\t}}\n");
+        // php-fpm mengenali ping dari SCRIPT_NAME; tanpa split_path Caddy mengirimnya kosong.
+        s += &format!(
+            "\treverse_proxy @ping {upstream} {{\n\t\ttransport fastcgi {{\n\t\t\tenv SCRIPT_NAME {PING_PATH}\n\t\t\tenv SCRIPT_FILENAME {PING_PATH}\n\t\t}}\n\t}}\n"
+        );
+    }
+    s += "\tencode zstd gzip\n";
+    // flush_interval -1: keluaran PHP diteruskan saat itu juga, tidak ditampung dulu.
+    // Tanpa ini respons yang dialirkan (SSE, unduhan yang dibangkitkan) baru tiba setelah selesai.
+    if o.behind_proxy {
+        // HTTPS berakhir di proxy. Tanpa HTTPS=on, WordPress mengira situsnya HTTP lalu
+        // berputar-putar dalam redirect. Hanya dipercaya bila pengirimnya di jaringan privat.
+        // REMOTE_ADDR diisi alamat pengunjung, bukan alamat proxy.
+        s += "\t@fwd_https {\n\t\theader X-Forwarded-Proto https\n\t\tremote_ip private_ranges\n\t}\n";
+        s += &format!(
+            "\tphp_fastcgi @fwd_https {upstream} {{\n\t\tflush_interval -1\n\t\tenv HTTPS on\n\t\tenv REMOTE_ADDR {{client_ip}}\n\t}}\n"
+        );
+        s += &format!(
+            "\tphp_fastcgi {upstream} {{\n\t\tflush_interval -1\n\t\tenv REMOTE_ADDR {{client_ip}}\n\t}}\n"
+        );
+    } else {
+        s += &format!("\tphp_fastcgi {upstream} {{\n\t\tflush_interval -1\n\t}}\n");
+    }
+    s += "\tfile_server\n}\n";
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::detect::detect;
+    use crate::testutil::project;
+
+    fn fpm() -> Php {
+        Php::Fpm {
+            bin: "php-fpm".into(),
+            conf: "/s/php-fpm.conf".into(),
+            sock: "/s/php-fpm.sock".into(),
+        }
+    }
+
+    #[test]
+    fn caddyfile_dev_hanya_di_loopback_dan_menolak_dotfile() {
+        let dir = project(&["wp-load.php", "index.php"]);
+        let o = Opts {
+            dir: dir.clone(),
+            ..Default::default()
+        };
+        let text = caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), &fpm());
+        assert!(text.contains("bind 127.0.0.1"));
+        assert!(text.contains("auto_https off"));
+        assert!(text.contains("respond @hidden 404"));
+        assert!(text.contains("respond @uploads_php 403"));
+    }
+
+    #[test]
+    fn caddyfile_domain_tidak_mematikan_https() {
+        let dir = project(&["index.php"]);
+        let o = Opts {
+            dir: dir.clone(),
+            domain: Some("situs.test".into()),
+            ..Default::default()
+        };
+        let text = caddyfile(&detect(&dir), &o, 443, Path::new("/s"), &fpm());
+        assert!(text.contains("situs.test {"));
+        assert!(!text.contains("auto_https off"));
+        assert!(!text.contains("@uploads_php"));
+    }
+
+    #[test]
+    fn caddyfile_di_belakang_proxy_terbuka_dan_mengenali_https_terusan() {
+        let dir = project(&["index.php"]);
+        let o = Opts {
+            dir: dir.clone(),
+            behind_proxy: true,
+            ..Default::default()
+        };
+        let text = caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), &fpm());
+        assert!(!text.contains("bind 127.0.0.1"));
+        assert!(text.contains("auto_https off"));
+        assert!(text.contains("trusted_proxies static private_ranges"));
+        assert!(text.contains("env HTTPS on"));
+    }
+
+    #[test]
+    fn caddyfile_php_cgi_memakai_port_loopback_tanpa_ping() {
+        let dir = project(&["index.php"]);
+        let o = Opts {
+            dir: dir.clone(),
+            ..Default::default()
+        };
+        let php = Php::Cgi {
+            bin: "php-cgi".into(),
+            ini: "/s/php.ini".into(),
+            port: 50123,
+        };
+        let text = caddyfile(&detect(&dir), &o, 8080, Path::new("/s"), &php);
+        assert!(text.contains("php_fastcgi 127.0.0.1:50123 {"));
+        assert!(!text.contains("@ping"));
+        assert!(!text.contains("unix/"));
+    }
+
+    #[test]
+    fn windows_ini_hanya_menyalakan_ekstensi_yang_ada() {
+        let dir = project(&[
+            "ext/php_exif.dll",
+            "ext/php_mbstring.dll",
+            "ext/php_opcache.dll",
+            "ext/php_tidak_dikenal.dll",
+            "extras/ssl/cacert.pem",
+        ]);
+        let text = windows_ini(&dir);
+        let at = |needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("{needle} tidak ada di:\n{text}"))
+        };
+        assert!(at("extension = mbstring\n") < at("extension = exif\n"));
+        at("zend_extension = opcache\n");
+        at("curl.cainfo = ");
+        assert!(!text.contains("gd"));
+        assert!(!text.contains("tidak_dikenal"));
+        assert!(!text.contains('\\'));
+    }
+}
