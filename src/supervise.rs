@@ -31,15 +31,33 @@ pub fn plain_log(name: &str, line: &str) -> Option<String> {
 
 /// Log akses Caddy, diringkas menjadi satu baris: alamat pengunjung, permintaan, kode
 /// jawaban, dan lama dilayani.
-fn access_line(v: &serde_json::Value) -> Option<String> {
-    let request = &v["request"];
+///
+/// Baris ini datang sekali per permintaan, jadi hanya bagian yang dipakai yang diuraikan;
+/// header dan sisanya dilewati tanpa disalin.
+fn access_line(line: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Access {
+        request: Request,
+        status: u64,
+        duration: f64,
+    }
+    #[derive(serde::Deserialize)]
+    struct Request {
+        client_ip: String,
+        method: String,
+        uri: String,
+    }
+    if !line.contains(r#""logger":"http.log.access"#) {
+        return None;
+    }
+    let a: Access = serde_json::from_str(line).ok()?;
     Some(format!(
         "[akses] {} {} {} {} {} ms",
-        request["client_ip"].as_str()?,
-        request["method"].as_str()?,
-        request["uri"].as_str()?,
-        v["status"].as_u64()?,
-        (v["duration"].as_f64()? * 1000.0).round()
+        a.request.client_ip,
+        a.request.method,
+        a.request.uri,
+        a.status,
+        (a.duration * 1000.0).round()
     ))
 }
 
@@ -102,17 +120,13 @@ const CADDY_NOISE: &[&str] = &[
 /// jalur php-cgi, yang tiba lewat Caddy terbungkus JSON dan ditampilkan isinya saja seperti
 /// di jalur php-fpm. Sisanya diteruskan apa adanya.
 fn caddy_log(name: &str, line: &str) -> Option<String> {
+    if let Some(text) = access_line(line) {
+        return Some(text);
+    }
     let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
         return plain_log(name, line);
     };
     let msg = v["msg"].as_str().unwrap_or_default();
-    if v["logger"]
-        .as_str()
-        .is_some_and(|l| l.starts_with("http.log.access"))
-        && let Some(text) = access_line(&v)
-    {
-        return Some(text);
-    }
     if msg == "stderr"
         && let Some(body) = v["body"].as_str()
     {
