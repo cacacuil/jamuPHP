@@ -1,6 +1,6 @@
 # JamuPHP: handoff v2
 
-Tanggal: 14 November 2026, revisi 15. Menggantikan handoff v1 ("XAMPP berbasis Rust").
+Tanggal: 15 November 2026, revisi 16. Menggantikan handoff v1 ("XAMPP berbasis Rust").
 Nama produk: JamuPHP. Perintahnya `jamu`, file config-nya `jamu.toml`. Repositori:
 https://github.com/cacacuil/jamuphp (lisensi AGPL-3.0).
 
@@ -48,6 +48,8 @@ Perubahan di revisi 15: jalur PHP diprofil (bagian 24). Keluaran PHP kini diteru
 20 ms dan pencatat FastCGI per permintaan dibuang; Laravel tanpa cache konfigurasi disebut
 oleh `check` dan `serve`. Worker mode diukur dengan tiga mesin (FrankenPHP, RoadRunner,
 Swoole), termasuk apa yang terjadi saat satu pekerja crash.
+Perubahan di revisi 16: `stabil-performa` (bagian 22 sampai 24) digabung ke `main` atas
+permintaan owner.
 
 ## 1. Inti dalam satu menit
 
@@ -1691,7 +1693,7 @@ Yang hanya diuji dari kode sumber dan tes unit, belum terhadap layanan sungguhan
   sungguhan, dan deploy di Dokploy dari image GHCR: perlu dilakukan owner.
 - Syarat lulus fase ini (sejumlah situs berjalan 30 hari) baru bisa dimulai setelah itu.
 
-## 22. Kestabilan dan performa (belum di `main`)
+## 22. Kestabilan dan performa (sudah di `main`)
 
 Dikerjakan di branch `stabil-performa`. Sasaran dari owner: performa dan kestabilan.
 Pengerasan keamanan ditunda. Aturannya tetap: ukur dulu, ubah hanya yang terukur.
@@ -1773,7 +1775,7 @@ jumlah pekerja mengikuti `--memory`.
 - **Tag image yang tetap per rilis.** Sekarang hanya `:8.4` yang terus ditimpa, jadi tidak
   ada versi untuk kembali bila rilis baru bermasalah.
 
-## 23. Pembanding: FrankenPHP dan nginx + php-fpm (belum di `main`)
+## 23. Pembanding: FrankenPHP dan nginx + php-fpm (sudah di `main`)
 
 Permintaan owner: uji dan bandingkan dengan yang lain, misalnya FrankenPHP. Skripnya
 `docs/benchmark/banding/banding.sh`, dijalankan workflow `banding` (hanya bila diminta
@@ -1897,7 +1899,7 @@ PHP satu baris dari 49% ke 53%. Pada Laravel tidak ada perubahan yang berarti (9
 `tests/e2e.sh`: 279 pemeriksaan di jalur php-fpm dan 276 di jalur `php-cgi`, semuanya
 lulus di sandbox. 39 tes unit.
 
-## 24. Performa jalur PHP dan worker mode (belum di `main`)
+## 24. Performa jalur PHP dan worker mode (sudah di `main`)
 
 Permintaan owner: perbaiki performanya; kuncinya kecepatan dan kestabilan. Bagian 23
 menunjukkan jamu paling lambat di halaman yang hampir kosong, jadi yang dicari di sini:
@@ -2067,7 +2069,8 @@ Yang perlu ditambahkan ke image supaya Octane jalan (dicatat karena gagal dulu d
 
 ### Keputusan yang menunggu owner
 
-1. **Menggabungkan `stabil-performa` ke `main`.** Image `:8.4` terbit ulang.
+1. ~~Menggabungkan `stabil-performa` ke `main`.~~ Sudah, atas permintaan owner (15 Nov
+   2026); image `:8.4` terbit ulang dari `main`.
 2. **`artisan optimize` otomatis saat start di mode production.** Untungnya +67% bagi
    siapa pun yang lupa; risikonya aplikasi yang memanggil `env()` di luar berkas
    konfigurasi. Kalau dikerjakan, perlu jalan keluar di `jamu.toml`. Sekarang jamu hanya
