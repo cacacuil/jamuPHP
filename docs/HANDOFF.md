@@ -2187,6 +2187,12 @@ lulus di sandbox. 45 tes unit. Yang baru:
   `--behind-proxy` cache konfigurasi dan rute benar-benar ada, lalu `/`, `/up`, basis
   data, sesi, rute closure, pekerja antrean, dan 404 tetap benar.
 
+CI (commit `2fce9a3`): Linux, Windows 8.5, image, dan supervisor lulus di percobaan
+pertama. Windows 8.4 gagal sekali di `tests/windows_stop.py` (situs PHP biasa, bukan jalur
+Laravel): permintaan pertama sesudah `jamu: siap` ditolak sambungannya. Job yang sama lulus
+saat dijalankan ulang tanpa perubahan kode. Sebabnya belum diketahui; `jamu: siap` baru
+dicetak sesudah port menerima sambungan, jadi ini perlu dicari bila muncul lagi.
+
 ### Keputusan yang menunggu owner
 
 1. Menggabungkan pekerjaan ini ke `main` (image `:8.4` terbit ulang dari sana).
