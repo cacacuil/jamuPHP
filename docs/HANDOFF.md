@@ -1,6 +1,6 @@
 # JamuPHP: handoff v2
 
-Tanggal: 15 November 2026, revisi 16. Menggantikan handoff v1 ("XAMPP berbasis Rust").
+Tanggal: 18 November 2026, revisi 17. Menggantikan handoff v1 ("XAMPP berbasis Rust").
 Nama produk: JamuPHP. Perintahnya `jamu`, file config-nya `jamu.toml`. Repositori:
 https://github.com/cacacuil/jamuphp (lisensi AGPL-3.0).
 
@@ -50,6 +50,8 @@ oleh `check` dan `serve`. Worker mode diukur dengan tiga mesin (FrankenPHP, Road
 Swoole), termasuk apa yang terjadi saat satu pekerja crash.
 Perubahan di revisi 16: `stabil-performa` (bagian 22 sampai 24) digabung ke `main` atas
 permintaan owner.
+Perubahan di revisi 17: `artisan optimize` otomatis dengan sakelar `optimize` di
+`jamu.toml` (bagian 25), di branch `stabil-performa`.
 
 ## 1. Inti dalam satu menit
 
@@ -1984,14 +1986,14 @@ Laravel yang sama, sandbox, `/up`, 32 koneksi:
 | `php artisan optimize` | 979 |
 
 Cache konfigurasi sendirian memberi +67%; tidak ada penyetelan server yang mendekati
-itu. Karena itu `jamu check` dan `jamu serve` menyebutnya bila `bootstrap/cache/config.php`
-belum ada. Catatan: `composer dump-autoload -o` menghapus cache itu (skrip
+itu. Catatan: `composer dump-autoload -o` menghapus cache itu (skrip
 `post-autoload-dump` Laravel), dan peta kelasnya sendiri tidak menambah apa-apa.
 
-jamu **belum** menjalankan `artisan optimize` sendiri. Di container variabel lingkungan
-baru ada saat container menyala, jadi cache tidak boleh dibuat di Dockerfile; ia harus
-dibuat saat start. Risikonya: aplikasi yang memanggil `env()` di luar berkas konfigurasi
-mendapat `null` begitu konfigurasi di-cache. Ini keputusan owner (lihat di bawah).
+Waktu bagian ini ditulis jamu hanya menyebut cache yang belum ada. Sejak revisi 17 jamu
+membangunnya sendiri saat start (bagian 25). Di container variabel lingkungan baru ada
+saat container menyala, jadi cache tidak boleh dibuat di Dockerfile; ia harus dibuat
+saat start. Risikonya: aplikasi yang memanggil `env()` di luar berkas konfigurasi
+mendapat `null` begitu konfigurasi di-cache.
 
 ### Yang diukur dan ditolak
 
@@ -2071,10 +2073,8 @@ Yang perlu ditambahkan ke image supaya Octane jalan (dicatat karena gagal dulu d
 
 1. ~~Menggabungkan `stabil-performa` ke `main`.~~ Sudah, atas permintaan owner (15 Nov
    2026); image `:8.4` terbit ulang dari `main`.
-2. **`artisan optimize` otomatis saat start di mode production.** Untungnya +67% bagi
-   siapa pun yang lupa; risikonya aplikasi yang memanggil `env()` di luar berkas
-   konfigurasi. Kalau dikerjakan, perlu jalan keluar di `jamu.toml`. Sekarang jamu hanya
-   menyebutnya.
+2. ~~`artisan optimize` otomatis saat start di mode production.~~ Dikerjakan atas
+   permintaan owner (18 Nov 2026), dengan sakelar `optimize` di `jamu.toml`: bagian 25.
 3. **Worker mode.** Dari tiga mesin, tidak ada yang sekaligus cepat, hemat memori, dan
    tahan crash: FrankenPHP cepat dan hemat tetapi jatuh seluruhnya; RoadRunner dan Swoole
    tahan crash tetapi boros memori dan, sejauh yang terukur, tidak cukup cepat. Baris
@@ -2084,13 +2084,113 @@ Yang perlu ditambahkan ke image supaya Octane jalan (dicatat karena gagal dulu d
 
 `tests/e2e.sh`: 290 pemeriksaan di jalur php-fpm dan 287 di jalur `php-cgi`, semuanya
 lulus di sandbox. 40 tes unit. Yang baru: catatan cache konfigurasi Laravel di `check`
-dan `serve` (muncul di production, diam di dev, hilang sesudah cache dibuat), dan keluaran
+dan `serve` (muncul di production, diam di dev, hilang sesudah cache dibuat; diganti
+bagian 25), dan keluaran
 bertahap yang tetap mengalir saat dimampatkan dan untuk SSE. Dua tes terakhir dibuktikan
 gagal dengan `flush_interval 5s`.
 
 Satu kali di CI, `tests/image.sh` gagal di `jamu composer --version` lalu lulus di run
 berikutnya dengan kode yang sama. Sebabnya belum diketahui; tes itu kini mencetak
 keluaran perintahnya supaya kejadian berikutnya bisa dibaca.
+
+## 25. `artisan optimize` otomatis (di branch `stabil-performa`, belum di `main`)
+
+Permintaan owner: kerjakan `artisan optimize` otomatis dengan sakelar mati. Ini keputusan
+nomor 2 di bagian 24; dasarnya pengukuran di sana (cache konfigurasi sendirian +67%).
+
+### Yang dibuat
+
+- **`src/laravel.rs`** (baru). Di mode production (`--domain` atau `--behind-proxy`),
+  `jamu serve` menjalankan `php artisan optimize --no-ansi --no-interaction` untuk project
+  Laravel yang `vendor`-nya sudah ada, **sebelum** php-fpm dan Caddy dinyalakan. Urutan
+  itu disengaja: tidak ada permintaan yang membaca berkas cache yang sedang ditulis, dan
+  di container variabel lingkungan baru ada saat itu.
+- **Sakelar `optimize` di `jamu.toml`**, tiga keadaan:
+
+  | Nilai | Dev | Production |
+  |---|---|---|
+  | tidak diisi | tidak dibangun | dibangun bila aman (lihat pemindaian `env()`) |
+  | `false` | tidak dibangun | tidak dibangun, tanpa kabar |
+  | `true` | dibangun | dibangun, pemindaian dilewati |
+
+- **Pemindaian `env()`**. Ini tambahan di luar permintaan harfiah, karena tanpanya fitur
+  ini bisa merusak situs diam-diam: sesudah konfigurasi di-cache Laravel tidak memuat
+  `.env`, jadi `env()` di luar berkas config mengembalikan `null`. Sebelum membangun,
+  jamu membaca berkas `.php` di `app`, `routes`, dan `resources/views`. Bila ada
+  panggilan `env(`, cache tidak dibangun dan sebabnya disebut dengan berkas dan baris:
+  `jamu: cache Laravel tidak dibangun: app/Layanan/Bayar.php baris 3 memanggil env() di
+  luar berkas config ...`. `jamu check` mencatat hal yang sama sebagai `catatan`, bukan
+  `MASALAH`. `optimize = true` memaksa.
+- **Batas waktu 60 detik** (`supervise::run_once`). Yang melewatinya dimatikan bersama
+  anak prosesnya. Permintaan berhenti (Ctrl+C, SIGTERM) tidak menunggu batas itu:
+  penangan sinyal dipasang sebelum cache dibangun.
+- **Gagal tidak menghalangi situs**. Status bukan nol, batas waktu, atau PHP CLI yang
+  tidak ketemu: situs tetap dinyalakan dengan cache yang ada, dan 15 baris terakhir
+  keluaran artisan ditampilkan dengan awalan `[optimize]`. Pesannya menyebut
+  `optimize = false`. Bila berhasil, keluaran artisan tidak ditampilkan; cukup satu baris
+  `jamu: cache Laravel dibangun (\`php artisan optimize\`, 0,3 detik)`.
+- **Dev**. Cache tidak dibangun. Bila `bootstrap/cache/config.php` tertinggal (misalnya
+  project disalin dari server), `serve` dan `check` menyebutnya, karena `.env` tidak lagi
+  terbaca dan itu membingungkan justru di laptop.
+- Catatan lama "konfigurasi belum di-cache" di `check` dan `serve` dihapus; tidak ada
+  lagi yang perlu dikerjakan pengguna.
+
+### Aturan pemindaian `env()`
+
+Heuristik baris demi baris, bukan pengurai PHP. `env(` dihitung kecuali didahului huruf,
+angka, `_`, `>`, `:`, `$`, atau `@`, dan kecuali barisnya komentar (`//`, `*`, `/*`, `#`
+selain `#[`). Jadi `getenv(`, `->env(`, `::env(`, `$env(`, `my_env(`, dan direktif Blade
+`@env(` tidak dihitung.
+
+Yang lolos dari heuristik ini, dua arah:
+
+- **Dihitung padahal aman**: `env(` di dalam string atau di tengah komentar blok yang
+  barisnya tidak diawali `*`. Akibatnya cache tidak dibangun dan sebabnya disebut; jalan
+  keluarnya `optimize = true`. Salah ke arah ini tidak merusak apa-apa.
+- **Tidak dihitung padahal berbahaya**: `env()` di dalam paket `vendor` (tidak dipindai;
+  paket yang benar tidak melakukannya), dan di folder di luar tiga folder itu (misalnya
+  `database`, `bootstrap`, atau folder modul buatan sendiri).
+
+### Hal yang perlu diketahui sebelum memakainya
+
+- **Konfigurasi dan rute dibekukan sampai jamu dinyalakan ulang.** Ini perubahan
+  perilaku. Sebelumnya, di server tanpa cache, `git pull` langsung terbaca. Sekarang
+  rute dan config yang lama tetap dipakai sampai `jamu` dinyalakan ulang atau
+  `jamu php artisan optimize` dijalankan. Di container hal ini tidak terasa (deploy =
+  container baru); di VPS dengan `--domain` perlu diingat. Sesudah `artisan optimize`
+  dijalankan tangan, php-fpm membaca berkas barunya dalam beberapa detik (opcache
+  memeriksa ulang cap waktu berkas).
+- `bootstrap/cache` harus bisa ditulis oleh pengguna yang menjalankan jamu. Resep
+  Dockerfile di README (`COPY --chown=www-data:www-data`) sudah memenuhinya. Bila tidak
+  bisa ditulis, artisan gagal dan jalur "gagal tidak menghalangi situs" yang berlaku.
+- Waktu start bertambah selama `artisan optimize` berjalan: 0,3 detik pada Laravel baru
+  di sandbox.
+- `artisan optimize` juga menjalankan perintah `optimize` milik paket (Filament,
+  Livewire, dan lain-lain mendaftarkannya). Itu yang dimaui, tetapi berarti waktu dan
+  kegagalannya bergantung pada paket yang terpasang.
+- Di Windows `kill_tree` hanya mematikan proses artisan itu sendiri, bukan cucunya. Tes
+  "artisan menggantung" hanya dijalankan di Linux.
+
+### Hasil uji
+
+`tests/e2e.sh`: 321 pemeriksaan di jalur php-fpm dan 318 di jalur `php-cgi`, semuanya
+lulus di sandbox. 45 tes unit. Yang baru:
+
+- Dengan artisan tiruan (`grup_check`): cache dibangun sebelum `jamu: siap`; artisan
+  dipanggil tepat sekali; dev tidak membangun dan menyebut cache yang tertinggal;
+  `optimize = false` diam; artisan gagal (situs tetap siap, pesan artisan tampil); artisan
+  menggantung (situs belum dinyalakan, jamu berhenti dalam 5 detik saat diminta, proses
+  artisan ikut mati); `env()` hanya di config (dibangun); `env()` di `app` (tidak
+  dibangun, sebabnya disebut, `check` mencatatnya); `optimize = true` memaksa; di luar
+  Laravel `optimize = true` diabaikan dengan kabar.
+- Dengan Laravel asli (`grup_laravel`): dev tidak meninggalkan cache; di
+  `--behind-proxy` cache konfigurasi dan rute benar-benar ada, lalu `/`, `/up`, basis
+  data, sesi, rute closure, pekerja antrean, dan 404 tetap benar.
+
+### Keputusan yang menunggu owner
+
+1. Menggabungkan pekerjaan ini ke `main` (image `:8.4` terbit ulang dari sana).
+2. Worker mode: tidak berubah dari bagian 24.
 
 ## Sumber
 

@@ -23,6 +23,9 @@ pub struct Settings {
     pub root: Option<String>,
     /// Penjadwal Laravel (`schedule:run` tiap menit). Bawaan: menyala kecuali di mode dev.
     pub scheduler: Option<bool>,
+    /// Cache Laravel (`artisan optimize`) dibangun tiap kali `serve` dinyalakan. Bawaan:
+    /// menyala kecuali di mode dev, dan kecuali aplikasinya memanggil `env()` di luar config.
+    pub optimize: Option<bool>,
     /// Batas waktu satu permintaan PHP, dalam detik. 0 berarti tanpa batas.
     timeout: Option<u64>,
     /// Pengaturan php.ini untuk project ini.
@@ -186,6 +189,7 @@ mod tests {
             php = "8.4"
             root = "web"
             scheduler = false
+            optimize = false
             timeout = 600
 
             [ini]
@@ -203,6 +207,9 @@ mod tests {
         assert_eq!(s.php.as_deref(), Some("8.4"));
         assert_eq!(s.root.as_deref(), Some("web"));
         assert_eq!(s.scheduler, Some(false));
+        assert_eq!(s.optimize, Some(false));
+        assert_eq!(Settings::default().optimize, None);
+        assert!(parse("optimize = \"ya\"").is_err());
         assert_eq!(s.timeout(), Some(600));
         assert_eq!(Settings::default().timeout(), Some(300));
         assert_eq!(parse("timeout = 0").unwrap().timeout(), None);

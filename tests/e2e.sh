@@ -594,6 +594,30 @@ EOF
   # penjadwal: tugas tiap menit jalan tanpa cron (paling lama menunggu satu pergantian menit)
   for _ in $(seq 1 150); do [ -s "$lar/storage/jadwal.txt" ] && break; sleep 0.5; done
   cek "penjadwal menjalankan tugas tiap menit" "$([ -s "$lar/storage/jadwal.txt" ] && echo yes || echo no)" yes
+  cek "dev: cache Laravel tidak dibangun" "$(ya test -e "$lar/bootstrap/cache/config.php")" no
+  stop_jamu
+
+  # Di server jamu membangun cache Laravel sendiri (`artisan optimize` yang asli), lalu
+  # aplikasinya harus tetap utuh: rute closure, sesi, basis data, dan antrean.
+  if ! start_jamu "$lar" 8102 "$log" --behind-proxy; then
+    cek "jamu siap (laravel di server)" no yes "jamu tidak menampilkan 'jamu: siap' dalam 40 detik"
+    stop_jamu; akhir_grup "$log"; return
+  fi
+  cek "server: cache Laravel dibangun" "$(has "$(cat "$log")" 'jamu: cache Laravel dibangun')" yes "$(cat "$log")"
+  cek "server: cache konfigurasi ada" "$(ya test -s "$lar/bootstrap/cache/config.php")" yes
+  cek "server: cache rute ada" "$(ls "$lar/bootstrap/cache" | grep -c '^routes')" 1 "$(ls "$lar/bootstrap/cache")"
+  cek "server: / 200" "$(kode "$B/")" 200
+  cek "server: /up 200" "$(kode "$B/up")" 200
+  cek "server: /uji-db memuat pengguna" "$(has "$(cu "$B/uji-db")" pengguna)" yes
+  rm -f "$jar"
+  s1=$(cu -c "$jar" -b "$jar" "$B/uji-sesi" | tr -d '[:space:]')
+  s2=$(cu -c "$jar" -b "$jar" "$B/uji-sesi" | tr -d '[:space:]')
+  cek "server: uji-sesi kedua" "$s1$s2" '{"n":1}{"n":2}'
+  rm -f "$lar/storage/antre.txt"
+  cek "server: rute closure tetap jalan" "$(cu "$B/uji-antre")" masuk-antrean
+  for _ in $(seq 1 40); do [ -s "$lar/storage/antre.txt" ] && break; sleep 0.5; done
+  cek "server: pekerja antrean mengerjakan tugas" "$(cat "$lar/storage/antre.txt" 2>/dev/null)" selesai
+  cek "server: /tidak-ada 404" "$(kode "$B/tidak-ada")" 404
   stop_jamu
   akhir_grup "$log"
 }
@@ -737,27 +761,111 @@ grup_check() {
   printf '%s\n' 'APP_KEY=base64:abc' 'APP_DEBUG=true' > "$d/laravel/.env"
   JAMU_COMPOSER="$d/tidak-ada.phar" periksa "$d/laravel"
   cek "laravel dev dengan APP_DEBUG: bukan masalah" "$(has "$keluaran" APP_DEBUG)" no "$keluaran"
-  cek "laravel dev: cache konfigurasi tidak disinggung" "$(has "$keluaran" 'belum di-cache')" no "$keluaran"
+  cek "laravel dev: cache tidak disinggung" "$(printf '%s\n' "$keluaran" | grep -c -E 'cache Laravel|di-cache')" 0 "$keluaran"
   JAMU_COMPOSER="$d/tidak-ada.phar" periksa "$d/laravel" --behind-proxy
   cek "laravel di server dengan APP_DEBUG: masalah" "$(has "$keluaran" 'MASALAH  APP_DEBUG')" yes "$keluaran"
-  cek "laravel di server tanpa cache konfigurasi: catatan" "$(has "$keluaran" 'catatan  konfigurasi Laravel belum di-cache')" yes "$keluaran"
   APP_DEBUG=false JAMU_COMPOSER="$d/tidak-ada.phar" periksa "$d/laravel" --behind-proxy
   cek "variabel lingkungan menang atas .env" "$(has "$keluaran" 'MASALAH  APP_DEBUG')" no "$keluaran"
-  # Cache konfigurasi adalah tuas terbesar untuk Laravel, jadi `serve` ikut menyebutnya di
-  # server; di dev tidak, karena di sana cache itu justru mengganggu.
-  local catatan='jamu: catatan: konfigurasi Laravel belum di-cache'
-  start_jamu "$d/laravel" 8108 "$log" --behind-proxy || cek "start laravel di server" gagal ok
-  cek "serve di server tanpa cache konfigurasi: catatan" "$(has "$(cat "$log")" "$catatan")" yes "$(cat "$log")"
+
+  # Cache Laravel (`artisan optimize`) adalah tuas terbesar untuk Laravel, jadi di server
+  # jamu membangunnya sendiri sebelum situs menerima permintaan. artisan di sini tiruan:
+  # ia mencatat argumennya dan berlaku menurut berkas `laku`.
+  local lar="$d/laravel" cache="$d/laravel/bootstrap/cache/config.php" dibangun='jamu: cache Laravel dibangun'
+  cat > "$lar/artisan" <<'EOF'
+<?php
+file_put_contents(__DIR__ . '/artisan.log', implode(' ', array_slice($argv, 1)) . "\n", FILE_APPEND);
+if (($argv[1] ?? '') !== 'optimize') { exit(0); }
+$laku = trim((string) @file_get_contents(__DIR__ . '/laku'));
+if ($laku === 'gagal') { fwrite(STDERR, "RuteGanda: nama rute dipakai dua kali\n"); exit(1); }
+if ($laku === 'gantung') { file_put_contents(__DIR__ . '/artisan.pid', getmypid()); sleep(600); }
+@mkdir(__DIR__ . '/bootstrap/cache', 0777, true);
+file_put_contents(__DIR__ . '/bootstrap/cache/config.php', '<?php return [];');
+echo "INFO  Caching framework bootstrap, configuration, and metadata.\n";
+EOF
+  dipanggil() { grep -c '^optimize' "$lar/artisan.log" 2>/dev/null; }
+  baris() { grep -n -m1 "$1" "$log" | cut -d: -f1; }
+
+  start_jamu "$lar" 8108 "$log" --behind-proxy || cek "start laravel di server" gagal ok
+  cek "server: cache dibangun" "$(has "$(cat "$log")" "$dibangun")" yes "$(cat "$log")"
+  cek "server: artisan optimize dipanggil sekali" "$(dipanggil)" 1
+  cek "server: berkas cache ada" "$(ya test -f "$cache")" yes
+  cek "server: cache dibangun sebelum situs siap" "$(ya test "$(baris "$dibangun")" -lt "$(baris 'jamu: siap')")" yes "$(cat "$log")"
+  cek "server: keluaran artisan tidak ditampilkan bila berhasil" "$(has "$(cat "$log")" 'Caching framework')" no "$(cat "$log")"
   stop_jamu
-  start_jamu "$d/laravel" 8108 "$log" || cek "start laravel dev" gagal ok
-  cek "serve dev: cache konfigurasi tidak disinggung" "$(has "$(cat "$log")" 'belum di-cache')" no "$(cat "$log")"
+
+  # Di dev cache tidak dibangun; cache yang tertinggal disebut karena .env tidak lagi terbaca.
+  start_jamu "$lar" 8108 "$log" || cek "start laravel dev" gagal ok
+  cek "dev: cache tidak dibangun" "$(dipanggil)" 1
+  cek "dev: cache yang tertinggal disebut" "$(has "$(cat "$log")" 'jamu: catatan: konfigurasi Laravel sedang di-cache')" yes "$(cat "$log")"
   stop_jamu
-  mkdir -p "$d/laravel/bootstrap/cache"; printf '%s\n' '<?php return [];' > "$d/laravel/bootstrap/cache/config.php"
-  APP_DEBUG=false JAMU_COMPOSER="$d/tidak-ada.phar" periksa "$d/laravel" --behind-proxy
-  cek "laravel dengan cache konfigurasi: tidak disinggung" "$(has "$keluaran" 'belum di-cache')" no "$keluaran"
-  start_jamu "$d/laravel" 8108 "$log" --behind-proxy || cek "start laravel ber-cache" gagal ok
-  cek "serve dengan cache konfigurasi: tidak disinggung" "$(has "$(cat "$log")" 'belum di-cache')" no "$(cat "$log")"
+  JAMU_COMPOSER="$d/tidak-ada.phar" periksa "$lar"
+  cek "check dev: cache yang tertinggal disebut" "$(has "$keluaran" 'catatan  konfigurasi Laravel sedang di-cache')" yes "$keluaran"
+  rm -f "$cache"
+  start_jamu "$lar" 8108 "$log" || cek "start laravel dev tanpa cache" gagal ok
+  cek "dev tanpa cache: tidak disinggung" "$(grep -c -E 'cache Laravel|di-cache' "$log")" 0 "$(cat "$log")"
   stop_jamu
+
+  # Sakelar mati.
+  printf '%s\n' 'optimize = false' > "$lar/jamu.toml"
+  start_jamu "$lar" 8108 "$log" --behind-proxy || cek "start laravel, optimize = false" gagal ok
+  cek "optimize = false: artisan optimize tidak dipanggil" "$(dipanggil)" 1
+  cek "optimize = false: tidak disinggung" "$(grep -c -E 'cache Laravel|di-cache' "$log")" 0 "$(cat "$log")"
+  stop_jamu
+  rm -f "$lar/jamu.toml"
+
+  # Gagal: situs tetap menyala, dan pesan artisan sampai ke log.
+  echo gagal > "$lar/laku"
+  start_jamu "$lar" 8108 "$log" --behind-proxy
+  cek "optimize gagal: situs tetap siap" "$(has "$(cat "$log")" 'jamu: siap')" yes "$(cat "$log")"
+  cek "optimize gagal: diberitakan" "$(has "$(cat "$log")" 'jamu: peringatan: `php artisan optimize` gagal')" yes "$(cat "$log")"
+  cek "optimize gagal: pesan artisan ditampilkan" "$(has "$(cat "$log")" '[optimize] RuteGanda: nama rute dipakai dua kali')" yes "$(cat "$log")"
+  cek "optimize gagal: sakelarnya disebut" "$(has "$(cat "$log")" 'optimize = false')" yes "$(cat "$log")"
+  stop_jamu
+
+  # Menggantung: permintaan berhenti tidak menunggu batas waktunya, dan artisan ikut mati.
+  if [ "$windows" = 0 ]; then
+    echo gantung > "$lar/laku"
+    "$JAMU" serve "$lar" --port 8108 --behind-proxy < /dev/null > /dev/null 2> "$log" &
+    JPID=$!
+    for _ in $(seq 1 20); do [ "$(dipanggil)" = 3 ] && break; sleep 0.2; done
+    cek "optimize menggantung: situs belum dinyalakan" "$(has "$(cat "$log")" 'jamu: siap')" no "$(cat "$log")"
+    local t0=$SECONDS
+    stop_jamu
+    cek "optimize menggantung: jamu berhenti saat diminta" "$(ya test $((SECONDS - t0)) -lt 5)" yes "$((SECONDS - t0)) detik"
+    cek "optimize menggantung: artisan ikut dimatikan" "$(ya kill -0 "$(cat "$lar/artisan.pid")" 2>/dev/null)" no
+  fi
+  rm -f "$lar/laku" "$cache"
+
+  # env() di luar berkas config mengembalikan null begitu konfigurasi di-cache. Aplikasi
+  # seperti itu tidak di-cache diam-diam; `optimize = true` memaksanya.
+  mkdir -p "$lar/app/Layanan" "$lar/config"
+  printf '%s\n' '<?php' 'return ["kunci" => env("KUNCI")];' > "$lar/config/layanan.php"
+  printf '%s\n' '<?php' '// env("KOMENTAR") tidak dihitung' '$a = getenv("X");' '$b = $request->env("Y");' > "$lar/app/Layanan/Aman.php"
+  start_jamu "$lar" 8108 "$log" --behind-proxy || cek "start laravel dengan env() di config" gagal ok
+  cek "env() hanya di config: cache dibangun" "$(has "$(cat "$log")" "$dibangun")" yes "$(cat "$log")"
+  stop_jamu
+  rm -f "$cache"
+  printf '%s\n' '<?php' 'class Bayar {' '    function kunci() { return env("KUNCI_BAYAR"); }' '}' > "$lar/app/Layanan/Bayar.php"
+  local sebelum; sebelum=$(dipanggil)
+  start_jamu "$lar" 8108 "$log" --behind-proxy || cek "start laravel dengan env() di app" gagal ok
+  cek "env() di app: cache tidak dibangun" "$(dipanggil)" "$sebelum"
+  cek "env() di app: alasannya disebut" "$(has "$(cat "$log")" 'jamu: cache Laravel tidak dibangun: app/Layanan/Bayar.php baris 3 memanggil env()')" yes "$(cat "$log")"
+  stop_jamu
+  APP_DEBUG=false JAMU_COMPOSER="$d/tidak-ada.phar" periksa "$lar" --behind-proxy
+  cek "check: env() di app dicatat" "$(has "$keluaran" 'catatan  app/Layanan/Bayar.php baris 3 memanggil env()')" yes "$keluaran"
+  cek "check: env() di app bukan masalah" "$(has "$keluaran" 'MASALAH  app/')" no "$keluaran"
+  printf '%s\n' 'optimize = true' > "$lar/jamu.toml"
+  start_jamu "$lar" 8108 "$log" --behind-proxy || cek "start laravel, optimize = true" gagal ok
+  cek "optimize = true: cache dibangun walau ada env() di app" "$(has "$(cat "$log")" "$dibangun")" yes "$(cat "$log")"
+  stop_jamu
+  rm -f "$lar/jamu.toml" "$cache"
+
+  # optimize hanya untuk Laravel.
+  printf '%s\n' 'optimize = true' > "$d/polos/jamu.toml"
+  start_jamu "$d/polos" 8108 "$log" --behind-proxy || cek "start polos, optimize = true" gagal ok
+  cek "optimize = true di luar Laravel: diabaikan dengan kabar" "$(has "$(cat "$log")" 'jamu: optimize = true diabaikan')" yes "$(cat "$log")"
+  stop_jamu
+  rm -f "$d/polos/jamu.toml"
 
   # Mode domain: nama yang belum ada di DNS adalah masalah; nama yang aneh ditolak sebelum
   # sempat ditulis ke konfigurasi.

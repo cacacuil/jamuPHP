@@ -2,7 +2,8 @@
 //! terjadwal; dan menghentikan semuanya dengan rapi.
 
 use std::io::{BufRead, BufReader, Read};
-use std::process::{Child, Command, Stdio};
+use std::path::Path;
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{fs, thread};
@@ -287,6 +288,54 @@ fn wait_or_kill(name: &str, child: &mut Child, start: Instant, budget: u64) {
     }
 }
 
+/// Akhir sebuah perintah yang dijalankan sekali dan ditunggu.
+#[derive(Debug)]
+pub enum Once {
+    Done,
+    Failed(ExitStatus),
+    TimedOut,
+    /// jamu diminta berhenti selagi perintahnya berjalan.
+    Stopped,
+}
+
+/// Menjalankan satu perintah sampai selesai, sebelum situs dinyalakan. Keluarannya ditulis
+/// ke berkas `out`. Perintah beserta anak-anaknya dimatikan bila melewati `budget`, atau
+/// bila jamu diminta berhenti: langkah persiapan tidak boleh menyandera start maupun stop.
+pub fn run_once(
+    mut cmd: Command,
+    out: &Path,
+    budget: Duration,
+    stop: &AtomicBool,
+) -> std::io::Result<Once> {
+    let file = fs::File::create(out)?;
+    cmd.stdin(Stdio::null())
+        .stdout(file.try_clone()?)
+        .stderr(file);
+    os::prepare(&mut cmd);
+    let mut child = cmd.spawn()?;
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(if status.success() {
+                Once::Done
+            } else {
+                Once::Failed(status)
+            });
+        }
+        let stopped = stop.load(Ordering::SeqCst);
+        if stopped || start.elapsed() > budget {
+            os::kill_tree(&mut child);
+            let _ = child.wait();
+            return Ok(if stopped {
+                Once::Stopped
+            } else {
+                Once::TimedOut
+            });
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn minute_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -440,6 +489,38 @@ pub fn supervise(plan: &Plan, stop: &AtomicBool, ready: impl FnOnce()) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn perintah_sekali_jalan_selesai_gagal_kehabisan_waktu_atau_dihentikan() {
+        let out = std::env::temp_dir().join(format!("jamu-once-{}.log", std::process::id()));
+        let run = |script: &str, budget: u64, stop: bool| {
+            run_once(
+                os::shell(script),
+                &out,
+                Duration::from_millis(budget),
+                &AtomicBool::new(stop),
+            )
+            .unwrap()
+        };
+        assert!(matches!(run("echo halo", 5000, false), Once::Done));
+        assert_eq!(fs::read_to_string(&out).unwrap().trim(), "halo");
+        // Keluaran galat masuk ke berkas yang sama.
+        assert!(
+            matches!(run("echo aduh 1>&2 && exit 3", 5000, false), Once::Failed(s) if s.code() == Some(3))
+        );
+        assert_eq!(fs::read_to_string(&out).unwrap().trim(), "aduh");
+        // `ping` ada di Linux dan Windows; dua-duanya menunggu sekitar 20 detik di sini.
+        let lama = if cfg!(windows) {
+            "ping -n 20 127.0.0.1"
+        } else {
+            "sleep 20"
+        };
+        let start = Instant::now();
+        assert!(matches!(run(lama, 300, false), Once::TimedOut));
+        assert!(matches!(run(lama, 60_000, true), Once::Stopped));
+        assert!(start.elapsed() < Duration::from_secs(5));
+        let _ = fs::remove_file(&out);
+    }
 
     #[test]
     fn kabar_php_fpm_ditulis_ulang() {

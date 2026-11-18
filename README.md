@@ -42,9 +42,9 @@ jamu check /path/ke/project --behind-proxy
 
 Yang diperiksa: `jamu.toml`, versi PHP, konfigurasi Caddy dan php-fpm yang akan dipakai,
 ekstensi yang diminta paket Composer, folder yang harus bisa ditulis, `APP_KEY`,
-`APP_DEBUG`, dan cache konfigurasi Laravel, rekaman DNS untuk `--domain`, dan folder yang ditutup lewat
-`.htaccess` (`jamu` tidak membaca `.htaccess`, jadi folder seperti itu terbuka), dan relay
-SMTP bila mode teruskan email dipakai.
+`APP_DEBUG`, pemanggilan `env()` yang menghalangi cache Laravel, rekaman DNS untuk
+`--domain`, folder yang ditutup lewat `.htaccess` (`jamu` tidak membaca `.htaccess`, jadi
+folder seperti itu terbuka), dan relay SMTP bila mode teruskan email dipakai.
 
 PHP dan Composer untuk project ini, yaitu PHP yang sama dengan yang melayani situsnya:
 
@@ -56,14 +56,25 @@ jamu php artisan migrate
 jamu composer install
 ```
 
-Laravel di server: buat cache konfigurasinya tiap kali kode atau variabel lingkungan
-berubah. Tanpa cache itu Laravel membaca ulang `.env` dan semua berkas config di tiap
-permintaan; pada aplikasi baru selisihnya terukur 584 lawan 978 permintaan per detik.
-`jamu check` dan `jamu serve` menyebutnya bila cache itu belum ada.
+Laravel di server: `jamu serve` menjalankan `php artisan optimize` sendiri tiap kali
+dinyalakan, sebelum situs menerima permintaan. Tanpa cache itu Laravel membaca ulang `.env`
+dan semua berkas config di tiap permintaan; pada aplikasi baru selisihnya terukur 584 lawan
+978 permintaan per detik. Yang perlu diketahui:
 
-```bash
-jamu php artisan optimize
-```
+- Di mode dev cache tidak dibangun, supaya perubahan `.env` langsung terbaca.
+- Konfigurasi dan rute dibaca sekali saat `jamu` menyala. Sesudah mengganti kode atau
+  variabel lingkungan tanpa menyalakan ulang `jamu`, bangun ulang cachenya:
+
+  ```bash
+  jamu php artisan optimize
+  ```
+
+- Aplikasi yang memanggil `env()` di `app`, `routes`, atau `resources/views` tidak
+  di-cache, karena sesudah di-cache panggilan itu mengembalikan `null`. `jamu serve` dan
+  `jamu check` menyebut berkas dan barisnya; pindahkan panggilannya ke berkas config.
+- Bila `artisan optimize` gagal atau belum selesai dalam 60 detik, situs tetap dinyalakan
+  dan pesan galatnya ditampilkan.
+- `optimize = false` di `jamu.toml` mematikan langkah ini; `optimize = true` memaksanya.
 
 ## jamu.toml
 
@@ -75,6 +86,7 @@ php  = "8.4"            # tolak jalan dengan versi PHP lain
 root = "public"         # document root
 scheduler = true        # penjadwal; bawaan: menyala kecuali di mode dev
 timeout = 300           # batas waktu satu permintaan PHP, detik; 0 = tanpa batas
+optimize = false        # Laravel: jangan bangun cache saat menyala; bawaan: dibangun kecuali di mode dev
 
 [ini]
 memory_limit = "512M"

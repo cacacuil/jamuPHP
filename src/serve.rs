@@ -15,6 +15,7 @@ use crate::config::{
     workers,
 };
 use crate::detect::{Kind, Project, kind_name};
+use crate::laravel::{self, Cache};
 use crate::mail;
 use crate::paths::{find_bin, fnv1a, open_state};
 use crate::settings;
@@ -58,20 +59,6 @@ pub fn unwritable(p: &Project) -> Vec<(PathBuf, String)> {
         .filter(|d| d.is_dir())
         .filter_map(|d| os::unwritable(&d).map(|who| (d, who)))
         .collect()
-}
-
-/// Saran untuk Laravel yang berjalan di server tanpa cache konfigurasi: tanpa cache itu
-/// `.env` dan semua berkas config dibaca ulang di tiap permintaan. Terukur pada aplikasi
-/// baru: 584 req/dtk tanpa, 978 dengan. Tidak disarankan sebelum `vendor` ada, dan tidak
-/// bila aplikasinya menaruh cache itu di tempat lain.
-pub fn laravel_hint(p: &Project) -> Option<&'static str> {
-    let wanted = p.kind == Kind::Laravel
-        && p.dir.join("vendor/autoload.php").is_file()
-        && !p.dir.join("bootstrap/cache/config.php").is_file()
-        && env::var_os("APP_CONFIG_CACHE").is_none();
-    wanted.then_some(
-        "konfigurasi Laravel belum di-cache, jadi dibaca ulang di tiap permintaan; jalankan `jamu php artisan optimize` tiap kali kode atau variabel lingkungannya berubah",
-    )
 }
 
 /// Program PHP yang melayani situs: php-fpm, atau php-cgi di Windows.
@@ -254,11 +241,18 @@ pub fn serve(o: Opts) -> Result<(), String> {
             None
         }
     };
-    // PHP baris perintah hanya dicari bila ada yang membutuhkannya.
-    let env = if run_workers.is_empty() && schedule.is_none() {
-        Vec::new()
-    } else {
-        php_cli(&project.dir, &settings)?.env
+    let cache = laravel::cache(&project, settings.optimize, dev);
+    if settings.optimize == Some(true) && project.kind != Kind::Laravel {
+        say!("jamu: optimize = true diabaikan: cache itu hanya untuk Laravel");
+    }
+    // PHP baris perintah hanya dicari bila ada yang membutuhkannya. Pekerja dan penjadwal
+    // tidak bisa jalan tanpanya; cache Laravel bisa dilewati.
+    let cli = (!run_workers.is_empty() || schedule.is_some() || cache == Cache::Build)
+        .then(|| php_cli(&project.dir, &settings));
+    let env = match &cli {
+        Some(Ok(cli)) => cli.env.clone(),
+        Some(Err(e)) if !run_workers.is_empty() || schedule.is_some() => return Err(e.clone()),
+        _ => Vec::new(),
     };
     let plan = Plan {
         caddy,
@@ -311,13 +305,23 @@ pub fn serve(o: Opts) -> Result<(), String> {
             d.display()
         );
     }
-    if let Some(hint) = laravel_hint(&project).filter(|_| !dev) {
-        say!("jamu: catatan: {hint}");
+    if let Some(note) = laravel::dev_note(&project, settings.optimize, dev) {
+        say!("jamu: catatan: {note}");
     }
 
+    // Sinyal ditangani sebelum cache dibangun: permintaan berhenti di tengahnya dipatuhi.
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
     ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst)).map_err(|e| e.to_string())?;
+
+    // Cache Laravel dibangun sebelum PHP dan Caddy menyala, supaya tidak ada permintaan yang
+    // membaca berkas cache setengah jadi.
+    match (&cache, &cli) {
+        (Cache::Build, Some(Ok(cli))) => laravel::optimize(&project.dir, cli, &state, &stop),
+        (Cache::Build, Some(Err(e))) => say!("jamu: cache Laravel tidak dibangun: {e}"),
+        (Cache::Unsafe(why), _) => say!("jamu: cache Laravel tidak dibangun: {why}"),
+        _ => {}
+    }
 
     let url = match o.domains.first() {
         Some(d) => format!("https://{d}"),

@@ -21,6 +21,7 @@ mod check;
 mod cli;
 mod config;
 mod detect;
+mod laravel;
 mod mail;
 #[cfg_attr(unix, path = "os_unix.rs")]
 #[cfg_attr(windows, path = "os_windows.rs")]
